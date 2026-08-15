@@ -1,0 +1,279 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000000F /* RealTimeTranslatorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000000E /* RealTimeTranslatorApp.swift */; };
+		A100000000000000000000011 /* PermissionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000010 /* PermissionManager.swift */; };
+		A100000000000000000000013 /* AudioDeviceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000012 /* AudioDeviceManager.swift */; };
+		A100000000000000000000015 /* SpeechEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000014 /* SpeechEngine.swift */; };
+		A100000000000000000000017 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000016 /* ContentView.swift */; };
+		A100000000000000000000019 /* TranslationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001A /* TranslationService.swift */; };
+		A10000000000000000000001B /* DeepSeekReviewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001C /* DeepSeekReviewService.swift */; };
+		A10000000000000000000001D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001E /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A100000000000000000000006 /* RealTimeTranslator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RealTimeTranslator.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000000E /* RealTimeTranslatorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealTimeTranslatorApp.swift; sourceTree = "<group>"; };
+		A100000000000000000000010 /* PermissionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionManager.swift; sourceTree = "<group>"; };
+		A100000000000000000000012 /* AudioDeviceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDeviceManager.swift; sourceTree = "<group>"; };
+		A100000000000000000000014 /* SpeechEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechEngine.swift; sourceTree = "<group>"; };
+		A100000000000000000000016 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A10000000000000000000001A /* TranslationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationService.swift; sourceTree = "<group>"; };
+		A10000000000000000000001C /* DeepSeekReviewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepSeekReviewService.swift; sourceTree = "<group>"; };
+		A10000000000000000000001E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A100000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000000018 /* RealTimeTranslator */,
+				A100000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A100000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000000006 /* RealTimeTranslator.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A100000000000000000000018 /* RealTimeTranslator */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000000E /* RealTimeTranslatorApp.swift */,
+				A100000000000000000000010 /* PermissionManager.swift */,
+				A100000000000000000000012 /* AudioDeviceManager.swift */,
+				A100000000000000000000014 /* SpeechEngine.swift */,
+				A100000000000000000000016 /* ContentView.swift */,
+				A10000000000000000000001A /* TranslationService.swift */,
+				A10000000000000000000001C /* DeepSeekReviewService.swift */,
+				A10000000000000000000001E /* Assets.xcassets */,
+			);
+			path = RealTimeTranslator;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A100000000000000000000004 /* RealTimeTranslator */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A100000000000000000000008 /* Build configuration list for PBXNativeTarget "RealTimeTranslator" */;
+		buildPhases = (
+			A100000000000000000000005 /* Sources */,
+			A10000000000000000000001F /* Resources */,
+		);
+		buildRules = (
+		);
+		dependencies = (
+		);
+		name = RealTimeTranslator;
+		productName = RealTimeTranslator;
+		productReference = A100000000000000000000006 /* RealTimeTranslator.app */;
+		productType = "com.apple.product-type.application";
+	};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A100000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A100000000000000000000004 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = A100000000000000000000007 /* Build configuration list for PBXProject "RealTimeTranslator" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A100000000000000000000002;
+			productRefGroup = A100000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A100000000000000000000004 /* RealTimeTranslator */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A100000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A100000000000000000000017 /* ContentView.swift in Sources */,
+				A100000000000000000000019 /* TranslationService.swift in Sources */,
+				A100000000000000000000015 /* SpeechEngine.swift in Sources */,
+				A100000000000000000000013 /* AudioDeviceManager.swift in Sources */,
+				A100000000000000000000011 /* PermissionManager.swift in Sources */,
+				A10000000000000000000000F /* RealTimeTranslatorApp.swift in Sources */,
+				A10000000000000000000001B /* DeepSeekReviewService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* Begin PBXResourcesBuildPhase section */
+		A10000000000000000000001F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001D /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A100000000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		A10000000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+	A10000000000000000000000B /* Debug */ = {
+		isa = XCBuildConfiguration;
+		buildSettings = {
+			ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+			CODE_SIGN_IDENTITY = "-";
+			CODE_SIGN_STYLE = Manual;
+			COMBINE_HIDPI_IMAGES = YES;
+			CURRENT_PROJECT_VERSION = 1;
+			ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "实时语音翻译";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+			INFOPLIST_KEY_NSHumanReadableCopyright = "";
+			INFOPLIST_KEY_NSMicrophoneUsageDescription = "需要使用麦克风来捕捉您的英语语音，以便进行实时识别与翻译。";
+			INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "需要访问您的照片图库，以便选择应用背景图片。";
+			INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "需要使用语音识别能力，将您所说的英语实时转换为文字。";
+			LD_RUNPATH_SEARCH_PATHS = (
+				"$(inherited)",
+				"@executable_path/../Frameworks",
+			);
+			MARKETING_VERSION = 1.0;
+			PRODUCT_BUNDLE_IDENTIFIER = com.local.RealTimeTranslator;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_EMIT_LOC_STRINGS = YES;
+			SWIFT_VERSION = 5.0;
+		};
+		name = Debug;
+		};
+	A10000000000000000000000C /* Release */ = {
+		isa = XCBuildConfiguration;
+		buildSettings = {
+			ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+			CODE_SIGN_IDENTITY = "-";
+			CODE_SIGN_STYLE = Manual;
+			COMBINE_HIDPI_IMAGES = YES;
+			CURRENT_PROJECT_VERSION = 1;
+			ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "实时语音翻译";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+			INFOPLIST_KEY_NSHumanReadableCopyright = "";
+			INFOPLIST_KEY_NSMicrophoneUsageDescription = "需要使用麦克风来捕捉您的英语语音，以便进行实时识别与翻译。";
+			INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "需要访问您的照片图库，以便选择应用背景图片。";
+			INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "需要使用语音识别能力，将您所说的英语实时转换为文字。";
+			LD_RUNPATH_SEARCH_PATHS = (
+				"$(inherited)",
+				"@executable_path/../Frameworks",
+			);
+			MARKETING_VERSION = 1.0;
+			PRODUCT_BUNDLE_IDENTIFIER = com.local.RealTimeTranslator;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_EMIT_LOC_STRINGS = YES;
+			SWIFT_VERSION = 5.0;
+		};
+		name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A100000000000000000000007 /* Build configuration list for PBXProject "RealTimeTranslator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A100000000000000000000009 /* Debug */,
+				A10000000000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A100000000000000000000008 /* Build configuration list for PBXNativeTarget "RealTimeTranslator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000000B /* Debug */,
+				A10000000000000000000000C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A100000000000000000000001 /* Project object */;
+}

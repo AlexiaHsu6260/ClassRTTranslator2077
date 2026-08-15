@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Xcode build artifacts
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcactivitylog
+*.pcm
+*.dia
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Editor
+.idea/
+.vscode/
