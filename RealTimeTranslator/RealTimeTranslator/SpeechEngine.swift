@@ -310,6 +310,9 @@ final class SpeechEngine: NSObject, ObservableObject {
     }
     /// 已翻译句子的原文集合（去重，避免识别修正导致重复翻译）。
     private var translatedSentenceKeys: Set<String> = []
+    /// 上一次 VAD 停顿时翻译过的开放句原文，用于计算下一次停顿的"新增后缀"，
+    /// 避免教授连续说话时同一段内容被反复从头翻译。
+    private var lastOpenSentence: String = ""
     /// 防抖任务：识别停止一段时间后才翻译，避免随每帧识别结果抖动。
     private var translationDebounceTask: Task<Void, Never>?
     /// 翻译串行链：保证翻译按顺序执行，避免并发导致译文乱序。
@@ -429,6 +432,9 @@ final class SpeechEngine: NSObject, ObservableObject {
             return
         }
         Self.diag("所选设备 \(deviceID) → CoreAudio id=\(audioDeviceID)")
+
+        // 开始新的识别流，重置开放句累计状态。
+        lastOpenSentence = ""
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -588,7 +594,10 @@ final class SpeechEngine: NSObject, ObservableObject {
             let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 let (pending, openSentence) = collectPendingSentences(trimmed, includeOpen: true)
-                finalizeSentenceTranslation(pending, openSentence: openSentence)
+                finalizeSentenceTranslation(pending, openSentence: nil)
+                if let openSentence {
+                    finalizeOpenSentenceIncrement(openSentence)
+                }
             }
         }
         finalizeRecording()
@@ -742,6 +751,7 @@ final class SpeechEngine: NSObject, ObservableObject {
         recognizedText = ""
         translatedText = ""
         translatedSentenceKeys.removeAll()
+        lastOpenSentence = ""
         translationDebounceTask?.cancel()
         translationDebounceTask = nil
         translationChain?.cancel()
@@ -888,9 +898,13 @@ final class SpeechEngine: NSObject, ObservableObject {
             guard let self, !Task.isCancelled else { return }
             // 收尾期间文本又被更新 → 识别仍在修正，本轮跳过，等下一轮（防抖会兜底）。
             if self.recognizedText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmed { return }
-            // 停顿即句界：当前未终止的最后一句也一并翻译。
+            // 停顿即句界：已确认的完整句直接翻译；仍在变化的开放句只翻译
+            // 相对于上一次停顿的"新增后缀"，避免教授连续说话时同一段被反复输出。
             let (pending, openSentence) = self.collectPendingSentences(trimmed, includeOpen: true)
-            self.finalizeSentenceTranslation(pending, openSentence: openSentence)
+            self.finalizeSentenceTranslation(pending, openSentence: nil)
+            if let openSentence {
+                self.finalizeOpenSentenceIncrement(openSentence)
+            }
         }
     }
 
@@ -928,15 +942,17 @@ final class SpeechEngine: NSObject, ObservableObject {
             .joined(separator: " ")
     }
 
-    /// 提交一批待翻译句子（`pending` 为已确认句，`openSentence` 为停顿时的末句）。
+    /// 提交一批已确认的完整句子翻译。
     /// 每句会带上其在课堂录音中的起始偏移（audioTime），供回看跳转与字幕导出使用。
     private func finalizeSentenceTranslation(_ pending: [String], openSentence: String?) {
         var toTranslate = pending
         if let openSentence, !openSentence.isEmpty {
+            // 兜底：极少数情况下外部仍传入开放句时，按完整句去重翻译。
             let key = Self.translationKey(for: openSentence)
-            guard !translatedSentenceKeys.contains(key) else { return }
-            translatedSentenceKeys.insert(key)
-            toTranslate.append(openSentence)
+            if !translatedSentenceKeys.contains(key) {
+                translatedSentenceKeys.insert(key)
+                toTranslate.append(openSentence)
+            }
         }
         guard !toTranslate.isEmpty else { return }
 
@@ -945,6 +961,41 @@ final class SpeechEngine: NSObject, ObservableObject {
         let audioTimes = Array(repeating: recordingOffset, count: toTranslate.count)
         Self.diag("停顿判句，待翻译: \(toTranslate.joined(separator: " | "))")
         enqueueTranslation(toTranslate, audioTimes: audioTimes)
+    }
+
+    /// 提交开放句（未终止文本）的**增量后缀**翻译。
+    ///
+    /// VAD 检测到的真实停顿时，语音识别可能仍在补充同一段话。若直接翻译整段开放句，
+    /// 会导致"You can change..."这类基础句被反复输出。这里只取当前开放句相对于
+    /// 上一次停顿时的新增后缀进行翻译，大幅提升连续长句场景下的体验。
+    private func finalizeOpenSentenceIncrement(_ openSentence: String) {
+        let current = openSentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return }
+        let last = lastOpenSentence.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let increment: String
+        if last.isEmpty {
+            increment = current
+        } else if current.hasPrefix(last) {
+            increment = String(current.dropFirst(last.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            // 发生识别修正或跳变（如 lastOpenSentence 前缀与当前不一致），
+            // 回退为翻译整个当前开放句；小幅重复优于漏译。
+            increment = current
+        }
+
+        guard !increment.isEmpty else { return }
+        let key = Self.translationKey(for: increment)
+        guard !translatedSentenceKeys.contains(key) else { return }
+        translatedSentenceKeys.insert(key)
+
+        let recordingOffset = currentRecordingTime - Self.recognitionLagCompensation
+        Self.diag("开放句增量翻译: \(increment)")
+        enqueueTranslation([increment], audioTimes: [recordingOffset])
+
+        // 记录本次开放句，供下一次停顿计算新增后缀。
+        lastOpenSentence = current
     }
 
     /// 当前录音文件已写入的时长（秒），0 表示未在录音。
