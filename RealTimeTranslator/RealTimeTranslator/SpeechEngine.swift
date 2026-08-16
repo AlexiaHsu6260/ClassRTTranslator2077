@@ -581,6 +581,16 @@ final class SpeechEngine: NSObject, ObservableObject {
         recognitionTask?.cancel()
         recognitionTask = nil
         forwarder?.recordingFile = nil
+        // 收尾判句：把未翻译的最后一句话也提交翻译，避免停止后丢失。
+        translationDebounceTask?.cancel()
+        translationDebounceTask = nil
+        if isTranslationEnabled {
+            let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let (pending, openSentence) = collectPendingSentences(trimmed, includeOpen: true)
+                finalizeSentenceTranslation(pending, openSentence: openSentence)
+            }
+        }
         finalizeRecording()
         forwarder = nil
         restoreInput()
@@ -847,19 +857,7 @@ final class SpeechEngine: NSObject, ObservableObject {
         guard !trimmed.isEmpty else { return }
 
         // 先收集已明确的完整句子（带终止标点，或非最后一段），延迟到停顿确认后再翻译。
-        let sentences = Self.splitIntoSentences(trimmed)
-        var pending: [String] = []
-        for (i, sentence) in sentences.enumerated() {
-            let t = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !t.isEmpty else { continue }
-            if i < sentences.count - 1 || Self.endsWithTerminalPunctuation(sentence) {
-                guard !translatedSentenceKeys.contains(t) else { continue }
-                translatedSentenceKeys.insert(t)
-                pending.append(t)
-            }
-        }
-        // 最后一段未终止的文本：停顿后一并翻译。
-        let openSentence = sentences.last?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (pending, _) = collectPendingSentences(trimmed, includeOpen: false)
 
         translationDebounceTask?.cancel()
         translationDebounceTask = Task { @MainActor [weak self] in
@@ -868,45 +866,59 @@ final class SpeechEngine: NSObject, ObservableObject {
             guard let self, !Task.isCancelled else { return }
             // 防抖期间识别文本又被更新 → 还在说话，本轮跳过，等下一轮。
             if self.recognizedText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmed { return }
-            var toTranslate = pending
-            if let openSentence, !openSentence.isEmpty,
-               !translatedSentenceKeys.contains(openSentence) {
-                translatedSentenceKeys.insert(openSentence)
-                toTranslate.append(openSentence)
-            }
-            self.finalizeSentenceTranslation(toTranslate)
+            // 停顿确认后，最后一段未终止的文本也一并翻译。
+            let (_, openSentence) = self.collectPendingSentences(trimmed, includeOpen: true)
+            self.finalizeSentenceTranslation(pending, openSentence: openSentence)
         }
     }
 
-    /// 音频级 VAD（静音检测）触发的停顿：静音持续约 0.9 秒视为"一句话说完"，
-    /// 立即按当前识别文本判句翻译，比纯文本防抖更快、更贴近真实停顿。
+    /// 音频级 VAD（静音检测）触发的停顿：静音持续约 0.9 秒视为"一句话说完"。
+    /// 给识别引擎约 0.4 秒收尾（让最终结果稳定、标点落定），再按停顿判句翻译，
+    /// 比纯文本防抖更快、更贴近真实停顿；收尾期间文本被更新则让位于下一轮识别。
     private func handlePauseDetected() {
-        guard isTranslationEnabled, isRecording, !isTranslating else { return }
+        guard isTranslationEnabled, isRecording else { return }
+        let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         translationDebounceTask?.cancel()
-        translationDebounceTask = nil
-        finalizeSentenceTranslation(nil)
+        translationDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard let self, !Task.isCancelled else { return }
+            // 收尾期间文本又被更新 → 识别仍在修正，本轮跳过，等下一轮（防抖会兜底）。
+            if self.recognizedText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmed { return }
+            // 停顿即句界：当前未终止的最后一句也一并翻译。
+            let (pending, openSentence) = self.collectPendingSentences(trimmed, includeOpen: true)
+            self.finalizeSentenceTranslation(pending, openSentence: openSentence)
+        }
     }
 
-    /// 对一批已确认句子提交翻译（`pendingOverride == nil` 时按当前识别文本重新判句）。
-    /// 每句会带上其在课堂录音中的起始偏移（audioTime），供回看跳转与字幕导出使用。
-    private func finalizeSentenceTranslation(_ pendingOverride: [String]?) {
-        var toTranslate: [String]
-        if let pendingOverride, !pendingOverride.isEmpty {
-            toTranslate = pendingOverride
-        } else {
-            let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let sentences = Self.splitIntoSentences(trimmed)
-            var collected: [String] = []
-            for (i, sentence) in sentences.enumerated() {
-                let t = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !t.isEmpty else { continue }
-                if i < sentences.count - 1 || Self.endsWithTerminalPunctuation(sentence) {
-                    guard !translatedSentenceKeys.contains(t) else { continue }
-                    translatedSentenceKeys.insert(t)
-                    collected.append(t)
-                }
+    /// 从文本中收集"已确认的完整句子"（带终止标点，或非最后一段），并去重。
+    /// `includeOpen` 为 true 时同时返回最后一段未终止的文本（停顿即句界）。
+    private func collectPendingSentences(_ text: String, includeOpen: Bool) -> ([String], String?) {
+        let sentences = Self.splitIntoSentences(text)
+        var pending: [String] = []
+        var openSentence: String?
+        for (i, sentence) in sentences.enumerated() {
+            let t = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else { continue }
+            if i < sentences.count - 1 || Self.endsWithTerminalPunctuation(sentence) {
+                guard !translatedSentenceKeys.contains(t) else { continue }
+                translatedSentenceKeys.insert(t)
+                pending.append(t)
+            } else if includeOpen {
+                openSentence = t
             }
-            toTranslate = collected
+        }
+        return (pending, openSentence)
+    }
+
+    /// 提交一批待翻译句子（`pending` 为已确认句，`openSentence` 为停顿时的末句）。
+    /// 每句会带上其在课堂录音中的起始偏移（audioTime），供回看跳转与字幕导出使用。
+    private func finalizeSentenceTranslation(_ pending: [String], openSentence: String?) {
+        var toTranslate = pending
+        if let openSentence, !openSentence.isEmpty,
+           !translatedSentenceKeys.contains(openSentence) {
+            translatedSentenceKeys.insert(openSentence)
+            toTranslate.append(openSentence)
         }
         guard !toTranslate.isEmpty else { return }
 
@@ -1081,13 +1093,24 @@ final class SpeechEngine: NSObject, ObservableObject {
         }
     }
 
-    /// 按句子终止符（. ! ? …）切分文本，返回句子列表（含结尾标点）。
+    /// 按句子终止符（中英文 . ! ? 。！？…）切分文本，返回句子列表（含结尾标点）。
+    /// 识别结果即使带了中文标点也能正确切句；英文缩写/数字中的点（如 U.S.A、3.5）不切分。
     private static func splitIntoSentences(_ text: String) -> [String] {
         var sentences: [String] = []
         var current = ""
-        for char in text {
+        let chars = Array(text)
+        for (index, char) in chars.enumerated() {
             current.append(char)
             if Self.isTerminalPunctuation(char) {
+                // 小数点或缩写点（前后紧跟字母/数字）不是句末标点，不切分。
+                if char == "." {
+                    let prev = index > 0 ? chars[index - 1] : nil
+                    let next = index + 1 < chars.count ? chars[index + 1] : nil
+                    if let prev, prev.isLetter || prev.isNumber,
+                       let next, next.isLetter || next.isNumber {
+                        continue
+                    }
+                }
                 sentences.append(current)
                 current = ""
             }
@@ -1100,6 +1123,7 @@ final class SpeechEngine: NSObject, ObservableObject {
 
     private static func isTerminalPunctuation(_ char: Character) -> Bool {
         char == "." || char == "!" || char == "?" || char == "…"
+            || char == "。" || char == "！" || char == "？"
     }
 
     private static func endsWithTerminalPunctuation(_ sentence: String) -> Bool {
