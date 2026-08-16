@@ -43,6 +43,56 @@ final class GlossaryManager: ObservableObject {
         save()
     }
 
+    // MARK: 候选提取与冲突检测
+
+    /// 常见英文停用词（提取候选术语时过滤）。
+    private static let stopWords: Set<String> = [
+        "the", "a", "an", "and", "or", "but", "so", "for", "with", "without",
+        "of", "to", "in", "on", "at", "by", "from", "into", "about", "as",
+        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "can", "could", "will", "would", "should", "may", "might",
+        "must", "not", "no", "yes", "this", "that", "these", "those", "there", "here",
+        "it", "its", "i", "you", "we", "they", "he", "she", "him", "her",
+        "all", "some", "any", "more", "most", "each", "every", "both", "other", "such",
+        "what", "which", "who", "when", "where", "why", "how", "then", "than", "also",
+        "just", "very", "really", "because", "if", "though", "although", "while", "until", "up",
+        "down", "out", "off", "over", "under", "again", "first", "second", "let", "get",
+    ]
+
+    /// 从课堂翻译记录中提取高频候选词（忽略停用词与已收录词），供一键添加术语。
+    func candidates(from sources: [String], limit: Int = 12) -> [(word: String, count: Int)] {
+        var frequency: [String: Int] = [:]
+        for source in sources {
+            let tokens = source.lowercased().split(whereSeparator: { !$0.isLetter })
+            for token in tokens {
+                let word = String(token)
+                guard word.count >= 4 else { continue }
+                guard !Self.stopWords.contains(word) else { continue }
+                guard !terms.contains(where: { $0.source.caseInsensitiveCompare(word) == .orderedSame }) else { continue }
+                frequency[word, default: 0] += 1
+            }
+        }
+        return frequency
+            .sorted { $0.value > $1.value }
+            .prefix(limit)
+            .map { (word: $0.key, count: $0.value) }
+    }
+
+    /// 冲突检测：返回添加该词条可能产生的提示（无冲突返回 nil）。
+    /// - 译文与现有其他词条相同（一词多译冲突）。
+    /// - 英文词已被收录。
+    func conflictMessage(source: String, target: String) -> String? {
+        let src = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dst = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if terms.contains(where: { $0.source.caseInsensitiveCompare(src) == .orderedSame }) {
+            return "该英文词汇已在术语表中（同一原文映射到不同译文会降低一致性）。"
+        }
+        if !dst.isEmpty, let existing = terms.first(where: { $0.target == dst }) {
+            return "译文「\(dst)」已被「\(existing.source)」使用，请确认是否要与现有术语区分。"
+        }
+        return nil
+    }
+
     func remove(_ term: GlossaryTerm) {
         terms.removeAll { $0.id == term.id }
         save()
@@ -219,6 +269,67 @@ enum DeepSeekReviewService {
                 let content: String
             }
         }
+    }
+
+    // MARK: - 要点提炼（实时摘要 / 课后快速要点）
+
+    /// 摘要响应结构。
+    private struct SummaryResponse: Codable {
+        let points: [String]
+    }
+
+    /// 把翻译记录提炼为关键知识要点（用于每 10 分钟增量摘要或课后快速要点）。
+    static func summarize(entries: [TranslationEntry], apiKey: String) async throws -> [String] {
+        guard !apiKey.isEmpty else {
+            throw NSError(domain: "DeepSeekReview", code: -1, userInfo: [NSLocalizedDescriptionKey: "未配置 API Key"])
+        }
+        let systemPrompt = """
+        你是一位课堂笔记助手。用户会提供一节课堂的实时翻译记录（每行：[序号] 英文原文 || 中文译文）。
+        请用简体中文提炼 5-8 条关键知识要点：每条 20-40 字，准确概括内容，适合直接用于复习，不要写序号。
+        严格只输出 JSON，格式：{"points":["要点1","要点2",...]}，不要输出任何其他文字或 markdown 标记。
+        """
+        let limited = entries.suffix(maxSubmittedEntries)
+        let lines = limited.enumerated().map { index, entry in
+            "[\(index + 1)] \(entry.source) || \(entry.target)"
+        }.joined(separator: "\n")
+        let userPrompt = "课堂翻译记录（共 \(entries.count) 条，以下为全部或最新 \(limited.count) 条）：\n\(lines)"
+
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userPrompt],
+            ],
+            "temperature": 0.4,
+            "response_format": ["type": "json_object"],
+        ]
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "DeepSeekReview", code: -2, userInfo: [NSLocalizedDescriptionKey: "网络请求失败"])
+        }
+        guard http.statusCode == 200 else {
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "DeepSeekReview",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "DeepSeek 摘要 API 错误（\(http.statusCode)）：\(message.prefix(160))"]
+            )
+        }
+        let apiResponse = try JSONDecoder().decode(APIResponse.self, from: data)
+        guard let content = apiResponse.choices.first?.message.content,
+              let resultData = content.data(using: .utf8) else {
+            throw NSError(domain: "DeepSeekReview", code: -3, userInfo: [NSLocalizedDescriptionKey: "未收到有效摘要结果"])
+        }
+        let parsed = try JSONDecoder().decode(SummaryResponse.self, from: resultData)
+        return parsed.points
     }
 
     private static func buildPrompt(entries: [TranslationEntry]) -> String {
@@ -502,11 +613,16 @@ enum DeepSeekTranslationService {
     /// 批量翻译英文句子为中文，严格遵循术语表。
     /// - Parameter courseContext: 可选。传整节课的上下文说明（如"这些句子来自同一节课的连续课堂记录"），
     ///   用于课后重新翻译时提示模型保持术语、人名与前后表达一致，获得比实时逐句翻译更好的质量。
+    /// - Parameter recentContext: 可选。传最近若干句的「原文 → 译文」对照，作为滑窗上下文，
+    ///   帮助代词、省略句与前文保持一致，提升实时翻译的连贯性。
+    /// - Parameter subject: 可选。当前课程科目（如"微积分"），用于提示学科术语偏好。
     static func translate(
         _ sentences: [String],
         glossary: [GlossaryTerm],
         apiKey: String,
-        courseContext: String? = nil
+        courseContext: String? = nil,
+        recentContext: [(source: String, target: String)] = [],
+        subject: String = ""
     ) async throws -> [String] {
         guard !sentences.isEmpty else { return [] }
         guard !apiKey.isEmpty else {
@@ -520,6 +636,15 @@ enum DeepSeekTranslationService {
         if !glossary.isEmpty {
             let glossaryLines = glossary.map { "\($0.source) → \($0.target)" }.joined(separator: "\n")
             systemPrompt += "\n\n必须遵循以下用户自定义术语表：术语表中出现的英文词汇必须使用指定中文翻译，不得意译或省略：\n\(glossaryLines)"
+        }
+        if !subject.isEmpty {
+            systemPrompt += "\n\n当前课堂科目：\(subject)。翻译时优先使用该学科的常用术语与表达。"
+        }
+        if !recentContext.isEmpty {
+            let contextLines = recentContext
+                .map { "原文: \($0.source)\n译文: \($0.target)" }
+                .joined(separator: "\n\n")
+            systemPrompt += "\n\n以下是最近已经翻译的句子（滑窗上下文），翻译新句子时请保持代词指代、专有名词与表达风格的一致：\n\(contextLines)"
         }
         if let courseContext, !courseContext.isEmpty {
             systemPrompt += "\n\n\(courseContext)"

@@ -73,6 +73,7 @@ struct ContentView: View {
     @State private var subtitlePanel: NSPanel?
     @StateObject private var glossary = GlossaryManager()
     @State private var isShowingTranslationSettings = false
+    @State private var isShowingHistory = false
 
     private static let subtitleFrameKey = "floatingSubtitleFrame"
 
@@ -133,6 +134,9 @@ struct ContentView: View {
         .sheet(isPresented: $isShowingTranslationSettings) {
             TranslationSettingsView(engine: engine, glossary: glossary)
         }
+        .sheet(isPresented: $isShowingHistory) {
+            HistoryCoursesView(glossaryTerms: glossary.terms)
+        }
     }
 
     /// 顶部封面栏：应用图标 + 名称 + 背景设置 + 录音状态。
@@ -175,6 +179,8 @@ struct ContentView: View {
 
             subtitleToggleButton
 
+            historyButton
+
             settingsButton
 
             backgroundMenu
@@ -206,6 +212,20 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help("弹出 / 收起悬浮字幕窗（仅显示最近两句）")
+    }
+
+    /// 历史课程入口：浏览与检索已归档的课堂记录。
+    private var historyButton: some View {
+        Button {
+            isShowingHistory = true
+        } label: {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.body)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("历史课程：浏览与检索已归档的课堂记录")
     }
 
     /// 翻译设置入口：翻译引擎选择 / DeepSeek API Key / 术语表。
@@ -348,6 +368,18 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
+                    Task { await engine.generateSummary() }
+                } label: {
+                    if engine.isSummarizing {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Label("生成要点", systemImage: "list.bullet.rectangle")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .help("调用 DeepSeek 把本节课内容提炼为要点（每 10 分钟自动生成）")
+                Button {
                     endCourse()
                 } label: {
                     Label("课程结束", systemImage: "stop.circle.fill")
@@ -458,6 +490,36 @@ struct ContentView: View {
                                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                                     RecentTranslationList(entries: recentTranslationEntries)
                                         .id("translation")
+                                }
+                            }
+                        }
+                        .padding(16)
+                    }
+
+                    // 实时要点（每 10 分钟由 DeepSeek 自动生成，也可点课程栏「生成要点」）
+                    if !engine.summaryPoints.isEmpty {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "list.bullet.rectangle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("实时要点")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(engine.summaryPoints.count) 条")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            ForEach(engine.summaryPoints, id: \.self) { point in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.8))
+                                    Text(point)
+                                        .font(.callout)
+                                        .textSelection(.enabled)
                                 }
                             }
                         }
@@ -800,9 +862,17 @@ private struct LevelMeter: View {
 }
 
 /// 悬浮字幕窗：无边框置顶小窗，仅显示最近两句翻译（英文原文 + 中文译文）。
+/// 支持调节透明度与字号（设置持久化到 UserDefaults）。
 private struct FloatingSubtitleView: View {
     @ObservedObject var engine: SpeechEngine
     var onClose: () -> Void
+
+    /// 字幕窗透明度（0.3…1.0，默认 0.95）。
+    @AppStorage("subtitle_opacity") private var subtitleOpacity = 0.95
+    /// 译文字号（11…24，默认 15）。
+    @AppStorage("subtitle_font_size") private var subtitleFontSize = 15.0
+    /// 原文字号（比译文略小）。
+    private var sourceFontSize: Double { max(10, subtitleFontSize - 2) }
 
     /// 最近两句翻译（不足两条时显示已有的）。
     private var recentTwo: [TranslationEntry] {
@@ -819,6 +889,34 @@ private struct FloatingSubtitleView: View {
                     .font(.caption.bold())
                     .foregroundStyle(.secondary)
                 Spacer()
+                Menu {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 8) {
+                            Text("透明度")
+                                .frame(width: 40, alignment: .leading)
+                            Slider(value: $subtitleOpacity, in: 0.3...1.0)
+                                .frame(width: 130)
+                        }
+                        HStack(spacing: 8) {
+                            Text("字号")
+                                .frame(width: 40, alignment: .leading)
+                            Slider(value: $subtitleFontSize, in: 11...24, step: 1)
+                                .frame(width: 130)
+                        }
+                        Text("设置会自动记住")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(6)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("字幕窗样式：透明度 / 字号")
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.body)
@@ -845,11 +943,11 @@ private struct FloatingSubtitleView: View {
                     ForEach(recentTwo) { entry in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(entry.source)
-                                .font(.system(size: 13))
+                                .font(.system(size: sourceFontSize))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
                             Text(entry.target)
-                                .font(.system(size: 15, weight: .medium))
+                                .font(.system(size: subtitleFontSize, weight: .medium))
                                 .lineLimit(2)
                         }
                         .padding(.horizontal, 12)
@@ -865,7 +963,7 @@ private struct FloatingSubtitleView: View {
             }
         }
         .padding(12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .background(.ultraThinMaterial.opacity(subtitleOpacity), in: RoundedRectangle(cornerRadius: 16))
         .overlay(
             RoundedRectangle(cornerRadius: 16)
                 .strokeBorder(Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.35), lineWidth: 1)
@@ -938,6 +1036,8 @@ private struct TranslationSettingsView: View {
     @State private var newSource = ""
     @State private var newTarget = ""
     @State private var importMessage: String?
+    @State private var subject = UserDefaults.standard.string(forKey: "course_subject") ?? ""
+    @State private var conflictMessage = ""
 
     private var trimmedSource: String { newSource.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var trimmedTarget: String { newTarget.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -970,6 +1070,7 @@ private struct TranslationSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 engineSection
+                subjectSection
                 apiKeySection
                 glossarySection
             }
@@ -990,6 +1091,25 @@ private struct TranslationSettingsView: View {
             }
             .pickerStyle(.segmented)
             Text("系统离线翻译：免费、无网可用、数据不出本机，但需 macOS 15+ 且质量一般。\nDeepSeek 在线翻译：翻译质量更高，可严格遵循下方术语表，需联网并配置 API Key。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: 课程科目
+
+    /// 课程科目：填写后 DeepSeek 翻译/摘要优先使用该学科术语。
+    private var subjectSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("课程科目")
+                .font(.headline)
+            TextField("课程科目（可选，如：微积分、线性代数）", text: $subject)
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: subject) { _, newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    UserDefaults.standard.set(trimmed, forKey: "course_subject")
+                }
+            Text("填写后，DeepSeek 翻译与摘要会优先使用该学科的术语与表达。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -1039,6 +1159,36 @@ private struct TranslationSettingsView: View {
                 }
                 .disabled(trimmedSource.isEmpty || trimmedTarget.isEmpty)
                 .help("添加术语")
+            }
+            if !conflictMessage.isEmpty {
+                Text(conflictMessage)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // 从本节课识别文本提取高频词，一键填入英文术语。
+            let candidates = glossary.candidates(from: engine.translationEntries.map(\.source), limit: 8)
+            if !candidates.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("本节课高频词（点击填入英文，补充中文译名后添加）")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 4), spacing: 6) {
+                        ForEach(candidates, id: \.word) { candidate in
+                            Button {
+                                newSource = candidate.word
+                                conflictMessage = ""
+                            } label: {
+                                Text("\(candidate.word) ×\(candidate.count)")
+                                    .lineLimit(1)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("填入「\(candidate.word)」（本节课出现 \(candidate.count) 次）")
+                        }
+                    }
+                }
+                .padding(.top, 2)
             }
             if glossary.terms.isEmpty {
                 Text("暂无术语。DeepSeek 在线翻译时会强制遵循术语表，提升专业词汇译文一致性。")
@@ -1101,7 +1251,12 @@ private struct TranslationSettingsView: View {
     // MARK: 动作
 
     private func addTerm() {
+        if let message = glossary.conflictMessage(source: trimmedSource, target: trimmedTarget) {
+            conflictMessage = message
+            return
+        }
         glossary.add(source: trimmedSource, target: trimmedTarget)
+        conflictMessage = ""
         newSource = ""
         newTarget = ""
     }
@@ -1228,6 +1383,17 @@ private struct CourseReviewView: View {
             Button(isPlayingRecording ? "暂停" : "播放录音") {
                 togglePlayback()
             }
+            Menu {
+                Button("导出 SRT 字幕（带时间轴）") {
+                    exportSubtitle(format: .srt)
+                }
+                Button("导出 VTT 字幕（网页字幕）") {
+                    exportSubtitle(format: .vtt)
+                }
+            } label: {
+                Label("导出字幕", systemImage: "captions.bubble")
+            }
+            .help("把本节课翻译记录导出为标准字幕文件，可直接挂到课程录屏上")
             Button("在访达中显示") {
                 revealRecording()
             }
@@ -1253,17 +1419,84 @@ private struct CourseReviewView: View {
             playbackPosition = 0
             player.play()
             isPlayingRecording = true
-            playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
-                let current = audioPlayer?.currentTime ?? 0
-                playbackPosition = current
-                if let player = audioPlayer, !player.isPlaying, isPlayingRecording {
-                    isPlayingRecording = false
-                    playbackPosition = player.duration
-                    playbackTimer?.invalidate()
-                }
-            }
+            startPlaybackTimer()
         } catch {
             reviewState = .failed("无法播放录音：\(error.localizedDescription)")
+        }
+    }
+
+    /// 启动播放进度定时器（首次播放 / 跳转后都会启用）。
+    private func startPlaybackTimer() {
+        playbackTimer?.invalidate()
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+            let current = audioPlayer?.currentTime ?? 0
+            playbackPosition = current
+            if let player = audioPlayer, !player.isPlaying, isPlayingRecording {
+                isPlayingRecording = false
+                playbackPosition = player.duration
+                playbackTimer?.invalidate()
+            }
+        }
+    }
+
+    /// 点击某条译文：跳转课堂录音到该句起始位置并播放（录音识别有约 1.5s 延迟，已由 audioTime 补偿）。
+    private func seekToEntry(_ entry: TranslationEntry) {
+        guard recordingExists, entry.audioTime > 0, let url = course.recordingURL else { return }
+        do {
+            if audioPlayer == nil {
+                let player = try AVAudioPlayer(contentsOf: url)
+                audioPlayer = player
+                player.prepareToPlay()
+                playbackDuration = player.duration
+            }
+            guard let player = audioPlayer else { return }
+            let target = min(max(entry.audioTime, 0), max(playbackDuration - 0.5, 0))
+            player.currentTime = target
+            player.play()
+            isPlayingRecording = true
+            startPlaybackTimer()
+        } catch {
+            reviewState = .failed("无法播放录音：\(error.localizedDescription)")
+        }
+    }
+
+    /// 导出字幕（SRT / VTT）到「桌面/课程记录/字幕/」。
+    private func exportSubtitle(format: SubtitleFormat) {
+        guard !course.entries.isEmpty else { return }
+        let content: String
+        switch format {
+        case .srt:
+            content = SubtitleExporter.srt(entries: course.entries, base: course.startDate)
+        case .vtt:
+            content = SubtitleExporter.vtt(entries: course.entries, base: course.startDate)
+        }
+        guard let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first else { return }
+        let folder = desktop.appendingPathComponent("课程记录", isDirectory: true)
+            .appendingPathComponent("字幕", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let name = Self.subtitleFileName(for: course, format: format)
+            let url = folder.appendingPathComponent(name)
+            try content.write(to: url, atomically: true, encoding: .utf8)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            reviewState = .failed("导出字幕失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// 字幕格式（内部枚举，避免与 SubtitleExporter 重名）。
+    private enum SubtitleFormat {
+        case srt, vtt
+    }
+
+    private static func subtitleFileName(for course: CourseSession, format: SubtitleFormat) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        let base = formatter.string(from: course.startDate)
+        switch format {
+        case .srt: return "\(base) 课堂字幕.srt"
+        case .vtt: return "\(base) 课堂字幕.vtt"
         }
     }
 
@@ -1292,6 +1525,11 @@ private struct CourseReviewView: View {
                             TranslationRow(entry: entry)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    seekToEntry(entry)
+                                }
+                                .help("点击跳转到课堂录音中的这句位置")
                             Divider()
                                 .padding(.leading, 86)
                         }
@@ -1556,6 +1794,121 @@ private struct CourseReviewView: View {
 
     private static func fullTimeString(_ date: Date) -> String {
         fullTimeFormatter.string(from: date)
+    }
+
+    private static func durationString(_ interval: TimeInterval) -> String {
+        let total = Int(interval)
+        return String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+    }
+}
+
+/// 历史课程浏览与检索：列出「桌面/课程记录/记录/」下的归档课程，支持关键词搜索与打开回看。
+private struct HistoryCoursesView: View {
+    let glossaryTerms: [GlossaryTerm]
+    @Environment(\.dismiss) private var dismiss
+    @State private var keyword = ""
+    @State private var courses: [CourseSession] = []
+    @State private var reviewingCourse: CourseSession?
+
+    private var filtered: [CourseSession] {
+        CourseArchive.search(keyword, in: courses)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label("历史课程", systemImage: "clock.arrow.circlepath")
+                    .font(.title3.bold())
+                    .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.escape)
+            }
+            .padding(16)
+            Divider()
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("搜索关键词（匹配原文或译文）", text: $keyword)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        // 无操作，过滤随输入实时生效
+                    }
+            }
+            .padding(12)
+            Divider()
+            if filtered.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "tray")
+                        .font(.system(size: 34))
+                        .foregroundStyle(.tertiary)
+                    Text(courses.isEmpty
+                         ? "还没有归档课程。\n课程结束后记录会自动保存到「桌面/课程记录/记录/」。"
+                         : "没有匹配「\(keyword)」的课程。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(filtered) { course in
+                            HistoryCourseRow(course: course)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    reviewingCourse = course
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                            Divider()
+                                .padding(.leading, 16)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 700, height: 480)
+        .background(Color(red: 0.05, green: 0.06, blue: 0.12))
+        .onAppear { courses = CourseArchive.loadAll() }
+        .sheet(item: $reviewingCourse) { course in
+            CourseReviewView(course: course, glossaryTerms: glossaryTerms)
+        }
+    }
+}
+
+/// 历史课程行：开始时间 + 条数/时长 + 原文预览。
+private struct HistoryCourseRow: View {
+    let course: CourseSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(Self.dateString(course.startDate))
+                    .font(.body.bold())
+                Spacer()
+                Text("\(course.entries.count) 条翻译 · 时长 \(Self.durationString(course.duration))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let first = course.entries.first {
+                Text(first.source)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .help("点击打开本节课回看（可重听录音 / 重新翻译 / 导出字幕 / 生成审阅）")
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    private static func dateString(_ date: Date) -> String {
+        dateFormatter.string(from: date)
     }
 
     private static func durationString(_ interval: TimeInterval) -> String {

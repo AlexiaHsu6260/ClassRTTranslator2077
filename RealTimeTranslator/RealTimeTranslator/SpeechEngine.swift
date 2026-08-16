@@ -12,16 +12,30 @@ import Translation
 ///
 /// 音频统一转换为 16kHz 单声道 Float32 后送入 `SFSpeechAudioBufferRecognitionRequest`，
 /// 完全本地识别，不联网。
-/// 一条翻译记录（英文原文 + 中文译文 + 发生时间）。
-struct TranslationEntry: Identifiable, Equatable {
+/// 一条翻译记录（英文原文 + 中文译文 + 发生时间 + 录音偏移）。
+struct TranslationEntry: Identifiable, Equatable, Codable {
     let id = UUID()
     let timestamp: Date
     let source: String
     let target: String
+    /// 该句在课堂录音中的起始偏移（秒）。0 表示不可用（历史数据或未开启录音）。
+    var audioTime: TimeInterval = 0
+
+    init(timestamp: Date, source: String, target: String, audioTime: TimeInterval = 0) {
+        self.timestamp = timestamp
+        self.source = source
+        self.target = target
+        self.audioTime = audioTime
+    }
+
+    /// 归档时不编码 id（加载时自动生成新的即可）。
+    private enum CodingKeys: String, CodingKey {
+        case timestamp, source, target, audioTime
+    }
 }
 
 /// 一节课程（用于课后回看完整翻译记录）。
-struct CourseSession: Identifiable, Equatable {
+struct CourseSession: Identifiable, Equatable, Codable {
     let id = UUID()
     let startDate: Date
     let endDate: Date
@@ -31,6 +45,156 @@ struct CourseSession: Identifiable, Equatable {
 
     /// 课程时长（秒）。
     var duration: TimeInterval { endDate.timeIntervalSince(startDate) }
+
+    /// 归档时不编码 id（加载时自动生成新的即可）。
+    private enum CodingKeys: String, CodingKey {
+        case startDate, endDate, entries, recordingURL
+    }
+}
+
+// MARK: - 离线翻译 KV 缓存
+
+/// 离线翻译 KV 缓存：同一句子（同一术语表）首次翻译后落盘，断网或重复出现时直接命中，
+/// 降低 API 依赖与费用。术语表变化会自动使缓存失效（指纹不同）。
+enum TranslationCache {
+    private static let defaults = UserDefaults.standard
+    private static let keyPrefix = "translation_cache_v1_"
+    /// 缓存放飞上限：超过后删除最早的键。
+    private static let maxEntries = 1_000
+
+    static func cached(_ sentence: String, glossaryFingerprint: String) -> String? {
+        defaults.string(forKey: keyPrefix + glossaryFingerprint + "|" + sentence)
+    }
+
+    static func store(_ sentence: String, _ result: String, glossaryFingerprint: String) {
+        defaults.set(result, forKey: keyPrefix + glossaryFingerprint + "|" + sentence)
+        trimIfNeeded()
+    }
+
+    /// 稳定哈希（不依赖进程内随机的 String.hashValue，保证重启后仍有效）。
+    static func stableHash(_ s: String) -> UInt64 {
+        var h: UInt64 = 14695981039346656037
+        for byte in s.utf8 {
+            h = (h ^ UInt64(byte)) &* 1099511628211
+        }
+        return h
+    }
+
+    private static func trimIfNeeded() {
+        let all = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix(keyPrefix) }
+        guard all.count > maxEntries * 2 else { return }
+        for key in all.sorted().prefix(maxEntries) {
+            defaults.removeObject(forKey: key)
+        }
+    }
+}
+
+// MARK: - 课程记录归档
+
+/// 课程记录归档：课程结束后把完整记录（含录音偏移）保存为 JSON 到「桌面/课程记录/记录/」，
+/// 供历史课程浏览与关键词检索（不依赖内存中的 completedCourse）。
+enum CourseArchive {
+    private static var folder: URL? {
+        guard let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first else { return nil }
+        return desktop
+            .appendingPathComponent("课程记录", isDirectory: true)
+            .appendingPathComponent("记录", isDirectory: true)
+    }
+
+    static func save(_ session: CourseSession) {
+        guard let folder else { return }
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
+            let name = "\(formatter.string(from: session.startDate)).json"
+            if let data = try? JSONEncoder().encode(session) {
+                try data.write(to: folder.appendingPathComponent(name))
+            }
+        } catch {
+            // 归档失败不影响主流程（下次课程结束会再次尝试）。
+        }
+    }
+
+    /// 按开始时间倒序返回全部历史课程。
+    static func loadAll() -> [CourseSession] {
+        guard let folder else { return [] }
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        let sessions = files.filter { $0.pathExtension == "json" }.compactMap { url -> CourseSession? in
+            guard let data = try? Data(contentsOf: url),
+                  let session = try? JSONDecoder().decode(CourseSession.self, from: data) else { return nil }
+            return session
+        }
+        return sessions.sorted { $0.startDate > $1.startDate }
+    }
+
+    /// 关键词检索：匹配原文或译文包含关键词的课程。
+    static func search(_ keyword: String, in sessions: [CourseSession]) -> [CourseSession] {
+        let kw = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !kw.isEmpty else { return sessions }
+        let lower = kw.lowercased()
+        return sessions.filter { session in
+            session.entries.contains { entry in
+                entry.source.lowercased().contains(lower) || entry.target.contains(kw)
+            }
+        }
+    }
+}
+
+// MARK: - 字幕导出
+
+/// 把课程翻译记录导出为标准字幕文件（SRT / WebVTT），可直接挂到课程录屏视频上。
+enum SubtitleExporter {
+    /// 每句的持续时长估算：按字符数缩放，限制在 1.5…8 秒。
+    private static func duration(for entry: TranslationEntry) -> TimeInterval {
+        max(1.5, min(8, Double(entry.source.count) * 0.06))
+    }
+
+    /// 返回该句在录音中的起始秒（优先用 audioTime，兼容旧数据用时间戳偏移）。
+    private static func startTime(for entry: TranslationEntry, base: Date) -> TimeInterval {
+        if entry.audioTime > 0 { return entry.audioTime }
+        return entry.timestamp.timeIntervalSince(base)
+    }
+
+    private static func formatSRTTime(_ t: TimeInterval) -> String {
+        let total = Int(t.rounded())
+        let ms = Int((t - floor(t)) * 1000)
+        return String(format: "%02d:%02d:%02d,%03d", total / 3600, (total % 3600) / 60, total % 60, ms)
+    }
+
+    private static func formatVTTTime(_ t: TimeInterval) -> String {
+        let total = Int(t.rounded())
+        let ms = Int((t - floor(t)) * 1000)
+        return String(format: "%02d:%02d:%02d.%03d", total / 3600, (total % 3600) / 60, total % 60, ms)
+    }
+
+    static func srt(entries: [TranslationEntry], base: Date) -> String {
+        var lines: [String] = []
+        for (index, entry) in entries.enumerated() {
+            let start = startTime(for: entry, base: base)
+            let end = start + duration(for: entry)
+            lines.append("\(index + 1)")
+            lines.append("\(formatSRTTime(start)) --> \(formatSRTTime(end))")
+            lines.append(entry.source)
+            lines.append(entry.target)
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func vtt(entries: [TranslationEntry], base: Date) -> String {
+        var lines: [String] = ["WEBVTT", ""]
+        for (index, entry) in entries.enumerated() {
+            let start = startTime(for: entry, base: base)
+            let end = start + duration(for: entry)
+            lines.append("\(index + 1)")
+            lines.append("\(formatVTTTime(start)) --> \(formatVTTTime(end))")
+            lines.append("\(entry.source)\n\(entry.target)")
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
 /// 翻译引擎类型：系统离线翻译（免费/无网可用）或 DeepSeek 在线翻译（质量更高、可遵循术语表）。
@@ -150,6 +314,30 @@ final class SpeechEngine: NSObject, ObservableObject {
     private var translationDebounceTask: Task<Void, Never>?
     /// 翻译串行链：保证翻译按顺序执行，避免并发导致译文乱序。
     private var translationChain: Task<Void, Never>?
+    /// 最近已翻译的句子（原文+译文），作为 DeepSeek 滑窗上下文，提升代词/省略句的连贯性。
+    private var recentContext: [(source: String, target: String)] = []
+    /// 滑窗上下文保留条数。
+    private static let maxRecentContext = 5
+
+    // MARK: - 课程科目（翻译上下文）
+
+    /// 当前课程科目（在翻译设置中配置，用于提升 DeepSeek 翻译的专业术语一致性）。
+    private var courseSubject: String {
+        UserDefaults.standard.string(forKey: "course_subject") ?? ""
+    }
+
+    // MARK: - 实时摘要
+
+    /// 本节课已生成的要点（每 10 分钟自动增量生成，也可手动触发）。
+    @Published private(set) var summaryPoints: [String] = []
+    /// 是否正在生成摘要。
+    @Published private(set) var isSummarizing = false
+    /// 上次摘要覆盖到的时间点（增量摘要，避免重复生成）。
+    private var summaryAnchorDate: Date?
+    /// 摘要定时任务（每 10 分钟一次）。
+    private var summaryTimerTask: Task<Void, Never>?
+    /// 自动摘要间隔。
+    private static let summaryInterval: TimeInterval = 600
 
     /// SFSpeechRecognizer 最兼容的输入格式：16kHz 单声道 Float32。
     private let targetFormat = AVAudioFormat(
@@ -303,6 +491,12 @@ final class SpeechEngine: NSObject, ObservableObject {
             forwarder.onError = { [weak self] message in
                 Task { @MainActor in
                     self?.lastError = message
+                }
+            }
+            // 音频级停顿检测（VAD）：静音约 0.9 秒立即判句，比纯文本防抖更跟手。
+            forwarder.onPauseDetected = { [weak self] in
+                Task { @MainActor in
+                    self?.handlePauseDetected()
                 }
             }
             self.forwarder = forwarder
@@ -556,7 +750,10 @@ final class SpeechEngine: NSObject, ObservableObject {
         courseDuration = 0
         isCourseActive = true
         completedCourse = nil
+        summaryPoints.removeAll()
+        summaryAnchorDate = nil
         startCourseTimer()
+        startAutoSummaryIfNeeded()
         Self.diag("课程开始")
     }
 
@@ -567,11 +764,53 @@ final class SpeechEngine: NSObject, ObservableObject {
         var session = CourseSession(startDate: start, endDate: Date(), entries: entries)
         session.recordingURL = currentRecordingURL ?? lastRecordingURL
         completedCourse = session
+        // 课程记录持久化到「桌面/课程记录/记录/」，供历史浏览与关键词检索。
+        CourseArchive.save(session)
         isCourseActive = false
         courseStartDate = nil
         courseTimerTask?.cancel()
         courseTimerTask = nil
+        summaryTimerTask?.cancel()
+        summaryTimerTask = nil
         Self.diag("课程结束，共记录 \(entries.count) 条翻译，录音: \(session.recordingURL?.path ?? "无")")
+    }
+
+    // MARK: - 实时摘要
+
+    /// 自动摘要：每 10 分钟增量生成一次要点（仅 DeepSeek 配置了 API Key 时）。
+    private func startAutoSummaryIfNeeded() {
+        guard !DeepSeekReviewService.savedAPIKey.isEmpty else { return }
+        summaryTimerTask?.cancel()
+        summaryTimerTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.summaryInterval * 1_000_000_000))
+                guard let self, !Task.isCancelled, self.isCourseActive else { return }
+                await self.generateSummary()
+            }
+        }
+    }
+
+    /// 把 startCourse 以来（或上次摘要以来）新增的翻译记录交给 DeepSeek 提炼要点。
+    func generateSummary() async {
+        guard !isSummarizing else { return }
+        guard !DeepSeekReviewService.savedAPIKey.isEmpty else {
+            lastError = "实时摘要需要 DeepSeek API Key：请点击「翻译设置」填写后重试。"
+            return
+        }
+        let anchor = summaryAnchorDate ?? courseStartDate ?? Date()
+        let fresh = translationEntries.filter { $0.timestamp > anchor }
+        summaryAnchorDate = Date()
+        guard !fresh.isEmpty else { return }
+        isSummarizing = true
+        defer { isSummarizing = false }
+        do {
+            let points = try await DeepSeekReviewService.summarize(entries: fresh, apiKey: DeepSeekReviewService.savedAPIKey)
+            summaryPoints.append(contentsOf: points)
+            Self.diag("实时摘要完成，新增 \(points.count) 条要点")
+        } catch {
+            Self.diag("实时摘要失败: \(error)")
+            lastError = "实时摘要失败：\(error.localizedDescription)"
+        }
     }
 
     private func startCourseTimer() {
@@ -607,7 +846,7 @@ final class SpeechEngine: NSObject, ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // 先收集已明确的完整句子（带终止标点，或非最后一段）。
+        // 先收集已明确的完整句子（带终止标点，或非最后一段），延迟到停顿确认后再翻译。
         let sentences = Self.splitIntoSentences(trimmed)
         var pending: [String] = []
         for (i, sentence) in sentences.enumerated() {
@@ -629,33 +868,84 @@ final class SpeechEngine: NSObject, ObservableObject {
             guard let self, !Task.isCancelled else { return }
             // 防抖期间识别文本又被更新 → 还在说话，本轮跳过，等下一轮。
             if self.recognizedText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmed { return }
-
             var toTranslate = pending
             if let openSentence, !openSentence.isEmpty,
                !translatedSentenceKeys.contains(openSentence) {
                 translatedSentenceKeys.insert(openSentence)
                 toTranslate.append(openSentence)
             }
-            Self.diag("停顿判句，待翻译: \(toTranslate.joined(separator: " | "))")
-            guard !toTranslate.isEmpty else { return }
-            self.enqueueTranslation(toTranslate)
+            self.finalizeSentenceTranslation(toTranslate)
         }
     }
 
+    /// 音频级 VAD（静音检测）触发的停顿：静音持续约 0.9 秒视为"一句话说完"，
+    /// 立即按当前识别文本判句翻译，比纯文本防抖更快、更贴近真实停顿。
+    private func handlePauseDetected() {
+        guard isTranslationEnabled, isRecording, !isTranslating else { return }
+        translationDebounceTask?.cancel()
+        translationDebounceTask = nil
+        finalizeSentenceTranslation(nil)
+    }
+
+    /// 对一批已确认句子提交翻译（`pendingOverride == nil` 时按当前识别文本重新判句）。
+    /// 每句会带上其在课堂录音中的起始偏移（audioTime），供回看跳转与字幕导出使用。
+    private func finalizeSentenceTranslation(_ pendingOverride: [String]?) {
+        var toTranslate: [String]
+        if let pendingOverride, !pendingOverride.isEmpty {
+            toTranslate = pendingOverride
+        } else {
+            let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sentences = Self.splitIntoSentences(trimmed)
+            var collected: [String] = []
+            for (i, sentence) in sentences.enumerated() {
+                let t = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !t.isEmpty else { continue }
+                if i < sentences.count - 1 || Self.endsWithTerminalPunctuation(sentence) {
+                    guard !translatedSentenceKeys.contains(t) else { continue }
+                    translatedSentenceKeys.insert(t)
+                    collected.append(t)
+                }
+            }
+            toTranslate = collected
+        }
+        guard !toTranslate.isEmpty else { return }
+
+        // 该句在录音中的近似起始偏移：识别结果通常滞后于真实语音约 1.5 秒，向前补偿。
+        let recordingOffset = currentRecordingTime - Self.recognitionLagCompensation
+        let audioTimes = Array(repeating: recordingOffset, count: toTranslate.count)
+        Self.diag("停顿判句，待翻译: \(toTranslate.joined(separator: " | "))")
+        enqueueTranslation(toTranslate, audioTimes: audioTimes)
+    }
+
+    /// 当前录音文件已写入的时长（秒），0 表示未在录音。
+    private var currentRecordingTime: TimeInterval {
+        guard let file = recordingFile else { return 0 }
+        return Double(file.length) / Double(targetFormat.sampleRate)
+    }
+
+    /// 识别结果相对于真实语音的滞后补偿（秒）。
+    private static let recognitionLagCompensation: TimeInterval = 1.5
+
     /// 把一组待翻译句子追加到串行队列，保证译文按顺序追加，杜绝并发乱序。
-    private func enqueueTranslation(_ sentences: [String]) {
+    private func enqueueTranslation(_ sentences: [String], audioTimes: [TimeInterval]) {
         let previous = translationChain
         translationChain = Task { @MainActor [weak self] in
             _ = await previous?.value
             guard let self, !Task.isCancelled else { return }
-            await self.translateSentences(sentences)
+            await self.translateSentences(sentences, audioTimes: audioTimes)
         }
     }
 
-    private func translateSentences(_ sentences: [String]) async {
+    private func translateSentences(_ sentences: [String], audioTimes: [TimeInterval]) async {
+        // 优先命中离线缓存：同一句子（同一术语表）不重复调 API。
+        if let cached = cachedResults(for: sentences) {
+            Self.diag("命中离线翻译缓存: \(sentences.joined(separator: " | "))")
+            appendTranslationResults(cached, for: sentences, audioTimes: audioTimes)
+            return
+        }
         // DeepSeek 在线翻译：不依赖 macOS 15 与本地语言包，失败时自动降级为系统翻译。
         if translationEngine == .deepseek {
-            await translateViaDeepSeek(sentences)
+            await translateViaDeepSeek(sentences, audioTimes: audioTimes)
             return
         }
         guard #available(macOS 15.0, *) else { return }
@@ -676,7 +966,8 @@ final class SpeechEngine: NSObject, ObservableObject {
         do {
             let results = try await service.translate(sentences, session: session)
             Self.diag("翻译完成: \(results.joined(separator: " | "))")
-            appendTranslationResults(results, for: sentences)
+            cacheResults(results, for: sentences)
+            appendTranslationResults(results, for: sentences, audioTimes: audioTimes)
         } catch {
             Self.diag("翻译失败: \(error)")
             if #available(macOS 26.0, *) {
@@ -693,8 +984,8 @@ final class SpeechEngine: NSObject, ObservableObject {
         isTranslating = false
     }
 
-    /// DeepSeek 在线翻译：遵循术语表；失败时自动降级为系统离线翻译。
-    private func translateViaDeepSeek(_ sentences: [String]) async {
+    /// DeepSeek 在线翻译：遵循术语表，携带滑窗上下文；失败时自动降级为系统离线翻译。
+    private func translateViaDeepSeek(_ sentences: [String], audioTimes: [TimeInterval]) async {
         let key = DeepSeekReviewService.savedAPIKey
         guard !key.isEmpty else {
             lastError = "DeepSeek 在线翻译需要 API Key：请点击「翻译设置」填写后重试。"
@@ -706,10 +997,13 @@ final class SpeechEngine: NSObject, ObservableObject {
             let results = try await DeepSeekTranslationService.translate(
                 sentences,
                 glossary: glossaryManager?.terms ?? [],
-                apiKey: key
+                apiKey: key,
+                recentContext: recentContext,
+                subject: courseSubject
             )
             Self.diag("DeepSeek 翻译完成: \(results.joined(separator: " | "))")
-            appendTranslationResults(results, for: sentences)
+            cacheResults(results, for: sentences)
+            appendTranslationResults(results, for: sentences, audioTimes: audioTimes)
             isTranslating = false
         } catch {
             Self.diag("DeepSeek 翻译失败，尝试降级系统翻译: \(error)")
@@ -728,7 +1022,8 @@ final class SpeechEngine: NSObject, ObservableObject {
             isTranslating = true
             do {
                 let results = try await service.translate(sentences, session: session)
-                appendTranslationResults(results, for: sentences)
+                cacheResults(results, for: sentences)
+                appendTranslationResults(results, for: sentences, audioTimes: audioTimes)
             } catch {
                 Self.diag("系统降级翻译也失败: \(error)")
             }
@@ -736,10 +1031,45 @@ final class SpeechEngine: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - 离线翻译缓存
+
+    /// 术语表指纹：术语表内容变化时缓存自动失效。
+    private var glossaryFingerprint: String {
+        let terms = glossaryManager?.terms ?? []
+        let joined = terms.map { "\($0.source.lowercased())=\($0.target)" }.joined(separator: ";")
+        return String(TranslationCache.stableHash(joined), radix: 36)
+    }
+
+    /// 整批句子全部命中缓存则返回结果，否则返回 nil（交给引擎翻译）。
+    private func cachedResults(for sentences: [String]) -> [String]? {
+        let fingerprint = glossaryFingerprint
+        var results: [String] = []
+        for sentence in sentences {
+            guard let hit = TranslationCache.cached(sentence, glossaryFingerprint: fingerprint) else { return nil }
+            results.append(hit)
+        }
+        return results
+    }
+
+    /// 把本轮翻译结果写入缓存（仅写非空译文）。
+    private func cacheResults(_ results: [String], for sentences: [String]) {
+        let fingerprint = glossaryFingerprint
+        for (sentence, result) in zip(sentences, results) where !result.isEmpty {
+            TranslationCache.store(sentence, result, glossaryFingerprint: fingerprint)
+        }
+    }
+
     /// 将翻译结果追加到记录与译文文本（带上限保护）。
-    private func appendTranslationResults(_ results: [String], for sentences: [String]) {
-        for (source, result) in zip(sentences, results) where !result.isEmpty {
-            translationEntries.append(TranslationEntry(timestamp: Date(), source: source, target: result))
+    private func appendTranslationResults(_ results: [String], for sentences: [String], audioTimes: [TimeInterval]) {
+        for (i, (source, result)) in zip(sentences, results).enumerated() where !result.isEmpty {
+            let audioTime = i < audioTimes.count ? audioTimes[i] : 0
+            let entry = TranslationEntry(timestamp: Date(), source: source, target: result, audioTime: audioTime)
+            translationEntries.append(entry)
+            // 维护 DeepSeek 滑窗上下文（最近 N 条原文+译文）。
+            recentContext.append((source: source, target: result))
+            if recentContext.count > Self.maxRecentContext {
+                recentContext.removeFirst(recentContext.count - Self.maxRecentContext)
+            }
             // 上限保护：只保留最近 N 条，防止长时间运行内存膨胀。
             if translationEntries.count > Self.maxTranslationEntries {
                 translationEntries.removeFirst(translationEntries.count - Self.maxTranslationEntries)
@@ -943,6 +1273,17 @@ private final class AudioForwarder {
     var onLevel: ((Float) -> Void)?
     var onAudioActive: ((Bool) -> Void)?
     var onError: ((String) -> Void)?
+    /// 音频级停顿检测回调：连续静音达到阈值后触发（VAD 判句用）。
+    var onPauseDetected: (() -> Void)?
+
+    // VAD 状态（仅在采集线程访问，无需加锁）
+    private var silenceDuration: TimeInterval = 0
+    private var hasSpoken = false
+    private var lastPauseAt: TimeInterval = 0
+    /// 判定为"一句话说完"的连续静音时长。
+    private static let pauseThreshold: TimeInterval = 0.9
+    /// 两次停顿回调之间的最小间隔，避免紧挨的短句重复触发。
+    private static let pauseCooldown: TimeInterval = 1.5
 
     init(targetFormat: AVAudioFormat) {
         self.targetFormat = targetFormat
@@ -977,8 +1318,31 @@ private final class AudioForwarder {
         if let recordingFile {
             try? recordingFile.write(from: converted)
         }
-        onLevel?(Self.computeLevel(converted))
+        let level = Self.computeLevel(converted)
+        onLevel?(level)
         onAudioActive?(true)
+        detectPause(level: level, duration: Double(converted.frameLength) / Double(targetFormat.sampleRate))
+    }
+
+    /// 音频级停顿检测：统计连续静音时长，达到阈值且处于"冷却期之外"时回调。
+    /// 静音阈值用原始 RMS（而非映射后的电平），避免低增益麦克风误判。
+    private func detectPause(level: Float, duration: TimeInterval) {
+        // computeLevel 返回 rms * 12；rms < 0.006 视为静音（≈ 映射后 0.072）。
+        let rms = level / 12
+        if rms < 0.006 {
+            if hasSpoken {
+                silenceDuration += duration
+                let now = CACurrentMediaTime()
+                if silenceDuration >= Self.pauseThreshold, now - lastPauseAt >= Self.pauseCooldown {
+                    lastPauseAt = now
+                    silenceDuration = 0
+                    onPauseDetected?()
+                }
+            }
+        } else {
+            hasSpoken = true
+            silenceDuration = 0
+        }
     }
 
     /// 统一转换到目标格式；已是目标格式则直接复用。

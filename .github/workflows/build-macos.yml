@@ -1,0 +1,57 @@
+name: Build macOS
+
+# 打 v* 标签或手动触发时，在 macOS 上构建 Release 并产出分发包（zip + dmg）。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build (Release, 免签名)
+        run: |
+          cd RealTimeTranslator
+          xcodebuild \
+            -project RealTimeTranslator.xcodeproj \
+            -scheme RealTimeTranslator \
+            -configuration Release \
+            -derivedDataPath ../build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package (zip + dmg)
+        run: |
+          APP=build/Build/Products/Release/RealTimeTranslator.app
+          mkdir -p dist
+          # 压缩版分发包
+          ditto -c -k --keepParent "$APP" dist/ClassRTTranslator2077.zip
+          # 安装镜像（拖拽安装）
+          hdiutil create \
+            -volname "ClassRTTranslator2077" \
+            -srcfolder "$APP" \
+            -ov -format UDZO \
+            dist/ClassRTTranslator2077.dmg
+          # 校验值
+          shasum -a 256 dist/ClassRTTranslator2077.dmg dist/ClassRTTranslator2077.zip > dist/SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClassRTTranslator-macOS
+          path: dist/
+
+      - name: Release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ClassRTTranslator2077.dmg
+            dist/ClassRTTranslator2077.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
