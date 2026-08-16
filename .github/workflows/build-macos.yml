@@ -14,7 +14,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build (Release, 免签名)
+      - name: Build (Release, adhoc 签名)
         run: |
           cd RealTimeTranslator
           xcodebuild \
@@ -22,7 +22,7 @@ jobs:
             -scheme RealTimeTranslator \
             -configuration Release \
             -derivedDataPath ../build \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="-" \
             build
 
       - name: Package (zip + dmg)
