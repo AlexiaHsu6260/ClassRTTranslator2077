@@ -59,6 +59,155 @@ final class BackgroundManager: ObservableObject {
     }
 }
 
+// MARK: - UI 主题
+
+/// 界面主题：赛博朋克（默认）/ 极简瑞士 / OLED 暗黑 / 玻璃拟态。
+/// 通过顶栏「主题」按钮切换，选择持久化到 UserDefaults（key: ui_theme）。
+enum UITheme: String, CaseIterable, Identifiable {
+    case cyberpunk
+    case swiss
+    case oled
+    case glass
+
+    var id: String { rawValue }
+
+    /// UserDefaults 持久化键。
+    static let storageKey = "ui_theme"
+
+    /// 从存储读取当前主题。
+    static func current() -> UITheme {
+        UITheme(rawValue: UserDefaults.standard.string(forKey: storageKey) ?? "") ?? .cyberpunk
+    }
+
+    var displayName: String {
+        switch self {
+        case .cyberpunk: return "赛博朋克"
+        case .swiss: return "极简瑞士"
+        case .oled: return "OLED 暗黑"
+        case .glass: return "玻璃拟态"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .cyberpunk: return "bolt.fill"
+        case .swiss: return "square.grid.2x2.fill"
+        case .oled: return "moon.fill"
+        case .glass: return "drop.fill"
+        }
+    }
+
+    /// 是否深色系（决定蒙版压暗强度等）。
+    var isDark: Bool {
+        switch self {
+        case .cyberpunk, .oled: return true
+        case .swiss, .glass: return false
+        }
+    }
+
+    // MARK: 颜色
+
+    /// 主强调色。
+    var primary: Color {
+        switch self {
+        case .cyberpunk: return Color(red: 0.0, green: 0.90, blue: 1.0)
+        case .swiss: return Color(red: 0.85, green: 0.10, blue: 0.10)
+        case .oled: return Color(red: 0.35, green: 0.85, blue: 0.85)
+        case .glass: return Color(red: 0.35, green: 0.60, blue: 1.0)
+        }
+    }
+
+    /// 次强调色。
+    var secondary: Color {
+        switch self {
+        case .cyberpunk: return Color(red: 1.0, green: 0.23, blue: 0.58)
+        case .swiss: return Color(red: 0.12, green: 0.12, blue: 0.12)
+        case .oled: return Color(red: 0.30, green: 0.80, blue: 1.0)
+        case .glass: return Color(red: 0.70, green: 0.45, blue: 1.0)
+        }
+    }
+
+    /// 渐变第三色（图标/背景渐变用）。
+    var tertiary: Color {
+        switch self {
+        case .cyberpunk: return Color(red: 0.55, green: 0.35, blue: 1.0)
+        case .swiss: return Color(red: 0.30, green: 0.30, blue: 0.30)
+        case .oled: return Color(red: 0.10, green: 0.45, blue: 0.60)
+        case .glass: return Color(red: 1.0, green: 0.55, blue: 0.80)
+        }
+    }
+
+    /// 弹窗/面板背景色。
+    var panelBackground: Color {
+        switch self {
+        case .cyberpunk: return Color(red: 0.05, green: 0.06, blue: 0.12)
+        case .swiss: return Color(red: 0.97, green: 0.97, blue: 0.96)
+        case .oled: return Color(red: 0.0, green: 0.0, blue: 0.0)
+        case .glass: return Color(red: 0.90, green: 0.94, blue: 1.0)
+        }
+    }
+
+    /// 卡片填充（材质或纯色）。
+    var cardFill: AnyShapeStyle {
+        switch self {
+        case .cyberpunk: return AnyShapeStyle(.ultraThinMaterial)
+        case .swiss: return AnyShapeStyle(Color(red: 0.99, green: 0.99, blue: 0.98))
+        case .oled: return AnyShapeStyle(Color(red: 0.03, green: 0.03, blue: 0.03))
+        case .glass: return AnyShapeStyle(.ultraThinMaterial)
+        }
+    }
+
+    /// 卡片描边颜色。
+    var stroke: Color {
+        switch self {
+        case .cyberpunk: return Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.35)
+        case .swiss: return Color(red: 0.10, green: 0.10, blue: 0.10).opacity(0.14)
+        case .oled: return Color(red: 0.35, green: 0.85, blue: 0.85).opacity(0.35)
+        case .glass: return Color.white.opacity(0.65)
+        }
+    }
+
+    /// 辉光/阴影颜色。
+    var glow: Color {
+        switch self {
+        case .cyberpunk: return Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.18)
+        case .swiss: return Color.black.opacity(0.08)
+        case .oled: return Color(red: 0.35, green: 0.85, blue: 0.85).opacity(0.15)
+        case .glass: return Color.black.opacity(0.12)
+        }
+    }
+
+    /// 主图标渐变。
+    var primaryGradient: LinearGradient {
+        switch self {
+        case .cyberpunk:
+            return LinearGradient(
+                colors: [primary, tertiary, secondary],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .swiss:
+            return LinearGradient(
+                colors: [primary, Color(red: 0.55, green: 0.08, blue: 0.08)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .oled:
+            return LinearGradient(
+                colors: [Color(red: 0.35, green: 0.85, blue: 0.85), Color(red: 0.10, green: 0.45, blue: 0.60)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .glass:
+            return LinearGradient(
+                colors: [Color(red: 0.35, green: 0.60, blue: 1.0), secondary, tertiary],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+}
+
 // MARK: - 主界面
 
 struct ContentView: View {
@@ -75,6 +224,11 @@ struct ContentView: View {
     @State private var isShowingTranslationSettings = false
     @State private var isShowingHistory = false
 
+    /// 当前界面主题（顶栏可切换，持久化到 UserDefaults）。
+    @AppStorage(UITheme.storageKey) private var themeName = UITheme.cyberpunk.rawValue
+
+    private var theme: UITheme { UITheme(rawValue: themeName) ?? .cyberpunk }
+
     private static let subtitleFrameKey = "floatingSubtitleFrame"
 
     var body: some View {
@@ -86,6 +240,8 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 560, minHeight: 440)
+        // 浅色主题（极简瑞士/玻璃拟态）强制浅色模式，深色主题强制深色模式，保证文字对比度。
+        .preferredColorScheme(theme.isDark ? .dark : .light)
         .task { deviceManager.refresh() }
         .onAppear { engine.setGlossaryManager(glossary) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
@@ -139,22 +295,12 @@ struct ContentView: View {
         }
     }
 
-    /// 顶部封面栏：应用图标 + 名称 + 背景设置 + 录音状态。
+    /// 顶部封面栏：应用图标 + 名称 + 主题/背景设置 + 录音状态。
     private var header: some View {
         HStack(spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.0, green: 0.90, blue: 1.0),
-                                Color(red: 0.55, green: 0.35, blue: 1.0),
-                                Color(red: 1.0, green: 0.23, blue: 0.58)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                    .fill(theme.primaryGradient)
                     .overlay(
                         RoundedRectangle(cornerRadius: 14)
                             .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
@@ -164,8 +310,8 @@ struct ContentView: View {
                     .foregroundStyle(.white)
             }
             .frame(width: 46, height: 46)
-            .shadow(color: Color(red: 1.0, green: 0.23, blue: 0.58).opacity(0.6), radius: 8, y: 0)
-            .shadow(color: Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.5), radius: 6, y: 0)
+            .shadow(color: theme.secondary.opacity(0.6), radius: 8, y: 0)
+            .shadow(color: theme.primary.opacity(0.5), radius: 6, y: 0)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("实时语音翻译")
@@ -183,21 +329,52 @@ struct ContentView: View {
 
             settingsButton
 
+            themeMenu
+
             backgroundMenu
 
             StatusBadge(isRecording: engine.isRecording)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .background(theme.cardFill, in: RoundedRectangle(cornerRadius: 18))
         .overlay(
             RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.35), lineWidth: 1)
+                .strokeBorder(theme.stroke, lineWidth: 1)
         )
-        .shadow(color: Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.18), radius: 12, y: 0)
+        .shadow(color: theme.glow, radius: 12, y: 0)
         .onChange(of: photoPickerItem) { _, item in
             loadPhoto(item)
         }
+    }
+
+    /// 主题切换菜单：赛博朋克 / 极简瑞士 / OLED 暗黑 / 玻璃拟态。
+    private var themeMenu: some View {
+        Menu {
+            ForEach(UITheme.allCases) { item in
+                Button {
+                    themeName = item.rawValue
+                } label: {
+                    Label(item.displayName, systemImage: item.iconName)
+                    if item == theme {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            Divider()
+            Text(theme.displayName + " · 当前主题")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } label: {
+            Image(systemName: "paintpalette.fill")
+                .font(.body)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("切换界面主题：赛博朋克 / 极简瑞士 / OLED 暗黑 / 玻璃拟态")
     }
 
     /// 悬浮字幕窗开关。
@@ -322,12 +499,12 @@ struct ContentView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .background(theme.cardFill, in: RoundedRectangle(cornerRadius: 16))
         .overlay(
             RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.28), lineWidth: 1)
+                .strokeBorder(theme.stroke.opacity(0.8), lineWidth: 1)
         )
-        .shadow(color: Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.12), radius: 10, y: 0)
+        .shadow(color: theme.glow.opacity(0.7), radius: 10, y: 0)
     }
 
     private var recordingButton: some View {
@@ -344,7 +521,7 @@ struct ContentView: View {
             .padding(.vertical, 8)
         }
         .buttonStyle(.borderedProminent)
-        .tint(engine.isRecording ? .red : Color(red: 0.0, green: 0.85, blue: 1.0))
+        .tint(engine.isRecording ? .red : theme.primary)
         .keyboardShortcut(.space, modifiers: .command)
         .help("开始 / 停止语音识别（⌘+空格）")
     }
@@ -361,7 +538,7 @@ struct ContentView: View {
             if engine.isCourseActive {
                 Text(formattedDuration(engine.courseDuration))
                     .font(.callout.monospacedDigit())
-                    .foregroundStyle(Color(red: 1.0, green: 0.35, blue: 0.70))
+                    .foregroundStyle(theme.secondary)
                     .help("本节课已进行时长")
                 Text("已记录 \(engine.translationEntries.count) 条")
                     .font(.caption)
@@ -398,7 +575,7 @@ struct ContentView: View {
                     Label("回看本节课", systemImage: "clock.arrow.circlepath")
                 }
                 .buttonStyle(.bordered)
-                .tint(Color(red: 0.0, green: 0.85, blue: 1.0))
+                .tint(theme.primary)
                 .help("查看本节课完整翻译记录")
                 Button {
                     startCourse()
@@ -406,7 +583,7 @@ struct ContentView: View {
                     Label("开始新课", systemImage: "play.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color(red: 1.0, green: 0.23, blue: 0.58))
+                .tint(theme.secondary)
             } else {
                 Spacer()
                 Button {
@@ -415,18 +592,18 @@ struct ContentView: View {
                     Label("课程开始", systemImage: "play.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color(red: 1.0, green: 0.23, blue: 0.58))
+                .tint(theme.secondary)
                 .help("开始课堂记录：自动开始录音，界面仅显示最近 1 分钟翻译，其余保留待课后回看")
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .background(theme.cardFill, in: RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.28), lineWidth: 1)
+                .strokeBorder(theme.stroke.opacity(0.8), lineWidth: 1)
         )
-        .shadow(color: Color(red: 1.0, green: 0.23, blue: 0.58).opacity(0.15), radius: 10, y: 0)
+        .shadow(color: theme.glow.opacity(0.8), radius: 10, y: 0)
     }
 
     private var transcriptArea: some View {
@@ -516,7 +693,7 @@ struct ContentView: View {
                                 HStack(alignment: .top, spacing: 6) {
                                     Image(systemName: "checkmark.circle.fill")
                                         .font(.system(size: 11))
-                                        .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.8))
+                                        .foregroundStyle(theme.primary.opacity(0.8))
                                     Text(point)
                                         .font(.callout)
                                         .textSelection(.enabled)
@@ -528,7 +705,7 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(.regularMaterial)
+            .background(theme.isDark ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Color.black.opacity(0.04)))
             .onChange(of: engine.recognizedText) { _, _ in
                 withAnimation {
                     proxy.scrollTo(engine.isRecording ? "cursor" : "text", anchor: .bottom)
@@ -543,9 +720,9 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(
             RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Color(red: 1.0, green: 0.23, blue: 0.58).opacity(0.25), lineWidth: 1)
+                .strokeBorder(theme.secondary.opacity(0.25), lineWidth: 1)
         )
-        .shadow(color: Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.12), radius: 10, y: 0)
+        .shadow(color: theme.glow.opacity(0.7), radius: 10, y: 0)
     }
 
     private var emptyHint: some View {
@@ -680,6 +857,8 @@ struct ContentView: View {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
+        // 独立面板不继承主窗口配色，按当前主题设置外观保证文字对比度。
+        panel.appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
         panel.contentView = NSHostingView(
             rootView: FloatingSubtitleView(engine: engine) {
                 self.hideSubtitle()
@@ -746,10 +925,14 @@ struct ContentView: View {
 
 // MARK: - 背景层
 
-/// 应用背景层：默认渐变主题，或用户选择的相册/文件图片（自动压暗保证可读性）。
+/// 应用背景层：按主题渲染（赛博朋克/极简瑞士/OLED/玻璃拟态），
+/// 或用户选择的相册/文件图片（自动压暗保证可读性）。
 private struct AppBackground: View {
     @ObservedObject var background: BackgroundManager
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(UITheme.storageKey) private var themeName = UITheme.cyberpunk.rawValue
+
+    private var theme: UITheme { UITheme(rawValue: themeName) ?? .cyberpunk }
 
     var body: some View {
         ZStack {
@@ -759,52 +942,113 @@ private struct AppBackground: View {
                     .scaledToFill()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
-                // 压暗蒙版：保证前景文字与卡片可读。
+                // 压暗蒙版：保证前景文字与卡片可读（浅色主题压暗更轻）。
                 Rectangle()
-                    .fill(colorScheme == .dark ? Color.black.opacity(0.5) : Color.black.opacity(0.35))
+                    .fill(theme.isDark ? Color.black.opacity(0.5) : Color.black.opacity(0.30))
                     .ignoresSafeArea()
-                // 霓虹氛围光：叠在用户图片上呼应赛博朋克主题。
-                Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.06)
+                // 氛围光：叠在用户图片上呼应当前主题。
+                theme.primary.opacity(0.06)
                     .ignoresSafeArea()
             } else {
-                // 赛博朋克默认背景：深色基底 + 霓虹渐变 + 品红/电青光斑。
-                ZStack {
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.04, green: 0.05, blue: 0.10),
-                            Color(red: 0.10, green: 0.04, blue: 0.18),
-                            Color(red: 0.03, green: 0.08, blue: 0.14)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    // 电青光斑（左上）
-                    Circle()
-                        .fill(Color(red: 0.0, green: 0.85, blue: 1.0).opacity(0.22))
-                        .frame(width: 380, height: 380)
-                        .blur(radius: 90)
-                        .offset(x: -180, y: -160)
-                    // 品红光斑（右下）
-                    Circle()
-                        .fill(Color(red: 1.0, green: 0.23, blue: 0.58).opacity(0.20))
-                        .frame(width: 420, height: 420)
-                        .blur(radius: 100)
-                        .offset(x: 200, y: 180)
-                    // 微弱扫描网格
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.03),
-                            Color.white.opacity(0.0),
-                            Color.white.opacity(0.03)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                }
-                .ignoresSafeArea()
+                themeBackground
+                    .ignoresSafeArea()
             }
         }
         .animation(.easeInOut(duration: 0.3), value: background.backgroundImage)
+        .animation(.easeInOut(duration: 0.3), value: theme)
+    }
+
+    /// 各主题默认背景。
+    @ViewBuilder
+    private var themeBackground: some View {
+        switch theme {
+        case .cyberpunk:
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.04, green: 0.05, blue: 0.10),
+                        Color(red: 0.10, green: 0.04, blue: 0.18),
+                        Color(red: 0.03, green: 0.08, blue: 0.14)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                // 电青光斑（左上）
+                Circle()
+                    .fill(Color(red: 0.0, green: 0.85, blue: 1.0).opacity(0.22))
+                    .frame(width: 380, height: 380)
+                    .blur(radius: 90)
+                    .offset(x: -180, y: -160)
+                // 品红光斑（右下）
+                Circle()
+                    .fill(Color(red: 1.0, green: 0.23, blue: 0.58).opacity(0.20))
+                    .frame(width: 420, height: 420)
+                    .blur(radius: 100)
+                    .offset(x: 200, y: 180)
+                // 微弱扫描网格
+                LinearGradient(
+                    colors: [Color.white.opacity(0.03), Color.white.opacity(0.0), Color.white.opacity(0.03)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+        case .swiss:
+            // 极简瑞士：米白基底 + 左上角瑞士红几何点缀 + 极淡网格。
+            ZStack {
+                LinearGradient(
+                    colors: [Color(red: 0.98, green: 0.98, blue: 0.97), Color(red: 0.94, green: 0.94, blue: 0.92)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Rectangle()
+                    .fill(Color(red: 0.85, green: 0.10, blue: 0.10).opacity(0.08))
+                    .frame(width: 420, height: 420)
+                    .offset(x: -220, y: -220)
+                Canvas { context, size in
+                    var path = Path()
+                    let step: CGFloat = 48
+                    var y: CGFloat = 0
+                    while y < size.height {
+                        path.move(to: CGPoint(x: 0, y: y))
+                        path.addLine(to: CGPoint(x: size.width, y: y))
+                        y += step
+                    }
+                    var x: CGFloat = 0
+                    while x < size.width {
+                        path.move(to: CGPoint(x: x, y: 0))
+                        path.addLine(to: CGPoint(x: x, y: size.height))
+                        x += step
+                    }
+                    context.stroke(path, with: .color(Color.black.opacity(0.03)), lineWidth: 1)
+                }
+            }
+        case .oled:
+            // OLED 暗黑：纯黑基底，无渐变、无光斑（真黑省电 + 高对比）。
+            Color.black
+        case .glass:
+            // 玻璃拟态：柔和多色渐变背景，衬托半透明磨砂卡片。
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.72, green: 0.82, blue: 1.0),
+                        Color(red: 0.92, green: 0.80, blue: 1.0),
+                        Color(red: 1.0, green: 0.84, blue: 0.92)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Circle()
+                    .fill(Color.white.opacity(0.55))
+                    .frame(width: 420, height: 420)
+                    .blur(radius: 110)
+                    .offset(x: -180, y: -160)
+                Circle()
+                    .fill(Color(red: 0.60, green: 0.80, blue: 1.0).opacity(0.45))
+                    .frame(width: 460, height: 460)
+                    .blur(radius: 120)
+                    .offset(x: 200, y: 180)
+            }
+        }
     }
 }
 
@@ -873,6 +1117,10 @@ private struct FloatingSubtitleView: View {
     @AppStorage("subtitle_font_size") private var subtitleFontSize = 15.0
     /// 原文字号（比译文略小）。
     private var sourceFontSize: Double { max(10, subtitleFontSize - 2) }
+    /// 当前主题（跟随主界面切换）。
+    @AppStorage(UITheme.storageKey) private var themeName = UITheme.cyberpunk.rawValue
+
+    private var theme: UITheme { UITheme(rawValue: themeName) ?? .cyberpunk }
 
     /// 最近两句翻译（不足两条时显示已有的）。
     private var recentTwo: [TranslationEntry] {
@@ -884,7 +1132,7 @@ private struct FloatingSubtitleView: View {
             HStack(spacing: 6) {
                 Image(systemName: "captions.bubble.fill")
                     .font(.caption)
-                    .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+                    .foregroundStyle(theme.primary)
                 Text("实时字幕 · 最近两句")
                     .font(.caption.bold())
                     .foregroundStyle(.secondary)
@@ -953,22 +1201,23 @@ private struct FloatingSubtitleView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 9)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+                        .background(theme.isDark ? Color.black.opacity(0.4) : Color.white.opacity(0.35),
+                                    in: RoundedRectangle(cornerRadius: 10))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.28), lineWidth: 1)
+                                .strokeBorder(theme.stroke.opacity(0.8), lineWidth: 1)
                         )
                     }
                 }
             }
         }
         .padding(12)
-        .background(.ultraThinMaterial.opacity(subtitleOpacity), in: RoundedRectangle(cornerRadius: 16))
+        .background(theme.cardFill.opacity(subtitleOpacity), in: RoundedRectangle(cornerRadius: 16))
         .overlay(
             RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.35), lineWidth: 1)
+                .strokeBorder(theme.stroke, lineWidth: 1)
         )
-        .shadow(color: Color(red: 0.0, green: 0.90, blue: 1.0).opacity(0.2), radius: 12, y: 0)
+        .shadow(color: theme.glow, radius: 12, y: 0)
         .frame(width: 360)
     }
 }
@@ -1038,6 +1287,9 @@ private struct TranslationSettingsView: View {
     @State private var importMessage: String?
     @State private var subject = UserDefaults.standard.string(forKey: "course_subject") ?? ""
     @State private var conflictMessage = ""
+    @AppStorage(UITheme.storageKey) private var themeName = UITheme.cyberpunk.rawValue
+
+    private var theme: UITheme { UITheme(rawValue: themeName) ?? .cyberpunk }
 
     private var trimmedSource: String { newSource.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var trimmedTarget: String { newTarget.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1049,14 +1301,14 @@ private struct TranslationSettingsView: View {
             content
         }
         .frame(width: 500, height: 560)
-        .background(Color(red: 0.05, green: 0.06, blue: 0.12))
+        .background(theme.panelBackground)
     }
 
     private var header: some View {
         HStack {
             Label("翻译设置", systemImage: "gearshape.2.fill")
                 .font(.title3.bold())
-                .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+                .foregroundStyle(theme.primary)
             Spacer()
             Button("完成") {
                 dismiss()
@@ -1201,7 +1453,7 @@ private struct TranslationSettingsView: View {
                         HStack {
                             Text(term.source)
                                 .font(.system(.body, design: .rounded).bold())
-                                .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+                                .foregroundStyle(theme.primary)
                             Image(systemName: "arrow.right")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -1221,7 +1473,7 @@ private struct TranslationSettingsView: View {
                         .padding(.vertical, 6)
                         .background(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color(red: 1.0, green: 0.23, blue: 0.58).opacity(0.35), lineWidth: 1)
+                                .stroke(theme.secondary.opacity(0.35), lineWidth: 1)
                         )
                     }
                 }
@@ -1243,7 +1495,7 @@ private struct TranslationSettingsView: View {
             if let importMessage {
                 Text(importMessage)
                     .font(.caption)
-                    .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+                    .foregroundStyle(theme.primary)
             }
         }
     }
@@ -1809,6 +2061,9 @@ private struct HistoryCoursesView: View {
     @State private var keyword = ""
     @State private var courses: [CourseSession] = []
     @State private var reviewingCourse: CourseSession?
+    @AppStorage(UITheme.storageKey) private var themeName = UITheme.cyberpunk.rawValue
+
+    private var theme: UITheme { UITheme(rawValue: themeName) ?? .cyberpunk }
 
     private var filtered: [CourseSession] {
         CourseArchive.search(keyword, in: courses)
@@ -1819,7 +2074,7 @@ private struct HistoryCoursesView: View {
             HStack {
                 Label("历史课程", systemImage: "clock.arrow.circlepath")
                     .font(.title3.bold())
-                    .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+                    .foregroundStyle(theme.primary)
                 Spacer()
                 Button("完成") { dismiss() }
                     .keyboardShortcut(.escape)
@@ -1869,7 +2124,7 @@ private struct HistoryCoursesView: View {
             }
         }
         .frame(width: 700, height: 480)
-        .background(Color(red: 0.05, green: 0.06, blue: 0.12))
+        .background(theme.panelBackground)
         .onAppear { courses = CourseArchive.loadAll() }
         .sheet(item: $reviewingCourse) { course in
             CourseReviewView(course: course, glossaryTerms: glossaryTerms)
