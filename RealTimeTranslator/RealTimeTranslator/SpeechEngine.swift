@@ -843,7 +843,10 @@ final class SpeechEngine: NSObject, ObservableObject {
     /// 本地语音识别的结果通常**不带标点**，因此不能依赖句号/问号判断句子结束，
     /// 改为「停顿判句」：识别文本稳定约 1.2 秒（用户说完一句话的自然停顿）即视为
     /// 一句话结束并翻译；带终止标点的句子则立即按句翻译。已翻译的句子通过
-    /// `translatedSentenceKeys` 去重，避免识别修正导致重复翻译。
+    /// 归一化后的 `translatedSentenceKeys` 去重，避免识别修正导致重复翻译。
+    ///
+    /// 注意：文本防抖期间只翻译已确认的完整句；仍在变化的"开放句"（未终止）
+    /// 交给 VAD 检测到的真实停顿时再翻译，避免识别结果逐字补充时同一句被反复输出。
     private func updateTranslationIfNeeded(for text: String) {
         guard isTranslationEnabled else { return }
         // 仅系统离线翻译依赖 macOS 15+ 与本地语言包；DeepSeek 在线翻译不依赖。
@@ -866,9 +869,9 @@ final class SpeechEngine: NSObject, ObservableObject {
             guard let self, !Task.isCancelled else { return }
             // 防抖期间识别文本又被更新 → 还在说话，本轮跳过，等下一轮。
             if self.recognizedText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmed { return }
-            // 停顿确认后，最后一段未终止的文本也一并翻译。
-            let (_, openSentence) = self.collectPendingSentences(trimmed, includeOpen: true)
-            self.finalizeSentenceTranslation(pending, openSentence: openSentence)
+            // 文本防抖只翻译已确认的完整句；开放句留给 VAD 的真实停顿触发，
+            // 避免识别结果逐字补充时同一句被反复翻译。
+            self.finalizeSentenceTranslation(pending, openSentence: nil)
         }
     }
 
@@ -901,8 +904,9 @@ final class SpeechEngine: NSObject, ObservableObject {
             let t = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { continue }
             if i < sentences.count - 1 || Self.endsWithTerminalPunctuation(sentence) {
-                guard !translatedSentenceKeys.contains(t) else { continue }
-                translatedSentenceKeys.insert(t)
+                let key = Self.translationKey(for: t)
+                guard !translatedSentenceKeys.contains(key) else { continue }
+                translatedSentenceKeys.insert(key)
                 pending.append(t)
             } else if includeOpen {
                 openSentence = t
@@ -911,13 +915,27 @@ final class SpeechEngine: NSObject, ObservableObject {
         return (pending, openSentence)
     }
 
+    /// 生成用于去重的句子 key：忽略大小写、标点和多余空格。
+    /// 识别结果常在大小写、标点和个别单词上修正，归一化后可避免同一句话被重复翻译。
+    private static func translationKey(for sentence: String) -> String {
+        let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+        let punctuation = CharacterSet.punctuationCharacters.union(.symbols)
+        let normalized = lowercased.components(separatedBy: punctuation)
+            .joined(separator: " ")
+        return normalized.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
     /// 提交一批待翻译句子（`pending` 为已确认句，`openSentence` 为停顿时的末句）。
     /// 每句会带上其在课堂录音中的起始偏移（audioTime），供回看跳转与字幕导出使用。
     private func finalizeSentenceTranslation(_ pending: [String], openSentence: String?) {
         var toTranslate = pending
-        if let openSentence, !openSentence.isEmpty,
-           !translatedSentenceKeys.contains(openSentence) {
-            translatedSentenceKeys.insert(openSentence)
+        if let openSentence, !openSentence.isEmpty {
+            let key = Self.translationKey(for: openSentence)
+            guard !translatedSentenceKeys.contains(key) else { return }
+            translatedSentenceKeys.insert(key)
             toTranslate.append(openSentence)
         }
         guard !toTranslate.isEmpty else { return }
