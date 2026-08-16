@@ -616,12 +616,14 @@ final class SpeechEngine: NSObject, ObservableObject {
     // MARK: - 长时间运行保护
 
     /// 统一的识别结果回调处理：更新文本、触发增量翻译、处理结束/异常。
-    /// - 正常 partial：仅刷新 recognizedText（翻译由 VAD 停顿判句触发，不在识别中提前翻译）。
-    /// - isFinal：把本段文本固化进 finalText，做一次收尾兜底翻译，再按当前模式（分段/结束）处理。
+    /// - 正常 partial：刷新 recognizedText，并按文本防抖判句翻译"已确认的完整句"。
+    /// - isFinal：把本段文本固化进 finalText；识别段结束≠句子结束，因此只翻译已确认完整句，
+    ///   绝不把还没说完的开放句提前翻译（开放句只在 VAD 真实停顿或用户主动停止时翻译）。
     /// - 非用户主动停止的错误：自动重连新分段。
     private func handleRecognitionResult(_ result: SFSpeechRecognitionResult?, error: Error?) {
         if let result {
             recognizedText = finalText + result.bestTranscription.formattedString
+            updateTranslationIfNeeded(for: recognizedText)
         }
         if let error {
             lastError = friendlyMessage(for: error)
@@ -632,7 +634,7 @@ final class SpeechEngine: NSObject, ObservableObject {
         if let result {
             finalText += result.bestTranscription.formattedString
             recognizedText = finalText
-            finalizeTranslationOnSegmentEnd()
+            updateTranslationIfNeeded(for: recognizedText)
         }
         recognitionRequest = nil
         recognitionTask = nil
@@ -837,12 +839,18 @@ final class SpeechEngine: NSObject, ObservableObject {
 
     // MARK: - 翻译
 
-    /// 识别段（isFinal / 错误）结束时的收尾兜底翻译。
+    /// 根据最新识别文本，找出"已说完的完整句子"并增量翻译。
     ///
-    /// 正常翻译完全由 VAD 停顿（静音 0.9 秒 = 一句话说完）触发，翻译严格发生在停顿之后，
-    /// 不会在说话过程中提前翻译。此处仅兜底：识别段结束时把尚未翻译的句子补翻，
-    /// 已翻译内容由归一化 key 去重，不会重复输出。
-    private func finalizeTranslationOnSegmentEnd() {
+    /// 本地语音识别的结果通常**不带标点**，因此不能依赖句号/问号判断句子结束，
+    /// 改为「停顿判句」：识别文本稳定约 1.2 秒（用户说完一句话的自然停顿）即视为
+    /// 一句话结束并翻译；带终止标点的句子则立即按句翻译。已翻译的句子通过
+    /// 归一化后的 `translatedSentenceKeys` 去重，避免识别修正导致重复翻译。
+    ///
+    /// 注意：此处只翻译已确认的完整句，绝不翻译仍在变化的"开放句"（未终止）——
+    /// 开放句只会在 VAD 检测到真实停顿（= 一句话说完）或用户主动停止时才翻译，
+    /// 因此识别过程中句子还没说完，不会提前输出半句译文；识别段自动分段时，
+    /// 正在说的半句也不会被提前翻译。
+    private func updateTranslationIfNeeded(for text: String) {
         guard isTranslationEnabled else { return }
         if translationEngine == .system {
             guard #available(macOS 15.0, *) else {
@@ -850,15 +858,29 @@ final class SpeechEngine: NSObject, ObservableObject {
                 return
             }
         }
-        let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let (pending, openSentence) = collectPendingSentences(trimmed, includeOpen: true)
-        finalizeSentenceTranslation(pending, openSentence: openSentence)
+
+        // 先收集已明确的完整句子（带终止标点，或非最后一段），延迟到停顿确认后再翻译。
+        let (pending, _) = collectPendingSentences(trimmed, includeOpen: false)
+
+        translationDebounceTask?.cancel()
+        translationDebounceTask = Task { @MainActor [weak self] in
+            // 长防抖：用户停顿 ≈ 一句话结束（识别结果一般不带标点）。
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard let self, !Task.isCancelled else { return }
+            // 防抖期间识别文本又被更新 → 还在说话，本轮跳过，等下一轮。
+            if self.recognizedText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmed { return }
+            // 文本防抖只翻译已确认的完整句；开放句留给 VAD 的真实停顿触发，
+            // 避免识别结果逐字补充时同一句被反复翻译或半句被提前翻译。
+            self.finalizeSentenceTranslation(pending, openSentence: nil)
+        }
     }
 
     /// 音频级 VAD（静音检测）触发的停顿：静音持续约 0.9 秒视为"一句话说完"（断句）。
     /// 给识别引擎约 0.4 秒收尾（让最终结果稳定、标点落定），再按停顿判句翻译，
-    /// 翻译严格跟随真实停顿，不在说话过程中提前翻译；收尾期间文本被更新则让位于下一轮。
+    /// 停顿即句界：此时句子已说完，把"已确认完整句 + 停顿末句"一并翻译；
+    /// 收尾期间文本被更新则让位于下一轮识别。
     private func handlePauseDetected() {
         guard isTranslationEnabled, isRecording else { return }
         let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
