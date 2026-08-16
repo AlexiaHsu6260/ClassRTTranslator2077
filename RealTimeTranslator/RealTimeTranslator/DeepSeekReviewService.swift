@@ -1,4 +1,110 @@
 import Foundation
+import Combine
+
+// MARK: - 术语表
+
+/// 一条术语表记录：用户自定义的专业词汇（英文 → 中文）。
+struct GlossaryTerm: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var source: String
+    var target: String
+    var note: String = ""
+
+    init(source: String, target: String, note: String = "") {
+        self.source = source
+        self.target = target
+        self.note = note
+    }
+}
+
+/// 术语表管理器：负责术语的增删、持久化，以及从 Markdown 词库表格导入。
+/// 术语表用于 DeepSeek 在线翻译时强制遵循，提升专业词汇的译文一致性。
+@MainActor
+final class GlossaryManager: ObservableObject {
+    @Published private(set) var terms: [GlossaryTerm] = []
+
+    private static let storageKey = "glossary_terms"
+
+    init() {
+        load()
+    }
+
+    // MARK: 增删改
+
+    func add(source: String, target: String, note: String = "") {
+        let src = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dst = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !src.isEmpty, !dst.isEmpty else { return }
+        // 英文大小写不敏感去重。
+        if terms.contains(where: { $0.source.caseInsensitiveCompare(src) == .orderedSame }) {
+            return
+        }
+        terms.append(GlossaryTerm(source: src, target: dst, note: note.trimmingCharacters(in: .whitespacesAndNewlines)))
+        save()
+    }
+
+    func remove(_ term: GlossaryTerm) {
+        terms.removeAll { $0.id == term.id }
+        save()
+    }
+
+    func clear() {
+        terms.removeAll()
+        save()
+    }
+
+    // MARK: 导入
+
+    /// 从 Markdown 表格词库（`| 英文 | 中文 | 注释 |`）导入术语，返回导入条数。
+    func importFromMarkdown(url: URL) -> Int {
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return 0 }
+        let rows = Self.parseMarkdownTable(content)
+        var added = 0
+        for row in rows {
+            guard !terms.contains(where: { $0.source.caseInsensitiveCompare(row.source) == .orderedSame }) else { continue }
+            terms.append(GlossaryTerm(source: row.source, target: row.target, note: row.note))
+            added += 1
+        }
+        save()
+        return added
+    }
+
+    /// 解析 Markdown 表格前两列（英文 / 中文）及第三列注释（可选），跳过表头与分隔行。
+    static func parseMarkdownTable(_ content: String) -> [(source: String, target: String, note: String)] {
+        var result: [(source: String, target: String, note: String)] = []
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("|") else { continue }
+            // 跳过表头与分隔行（第二列包含"中文"字样，或整行是 - 分隔符）。
+            if trimmed.contains("---") { continue }
+            let cells = trimmed.split(separator: "|", omittingEmptySubsequences: false).map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard cells.count >= 3 else { continue }
+            let source = cells[1]
+            let target = cells[2]
+            guard !source.isEmpty, !target.isEmpty else { continue }
+            if source == "英文" || target == "中文" { continue }
+            let note = cells.count >= 4 ? cells[3] : ""
+            result.append((source, target, note))
+        }
+        return result
+    }
+
+    // MARK: 持久化
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: Self.storageKey),
+              let decoded = try? JSONDecoder().decode([GlossaryTerm].self, from: data) else { return }
+        terms = decoded
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(terms) {
+            UserDefaults.standard.set(data, forKey: Self.storageKey)
+        }
+    }
+}
 
 /// DeepSeek 审阅服务：对课堂翻译记录进行审阅改进，并生成美观的格式化 HTML 文档。
 /// 文档包含总结、关键要点、主题分布图表、翻译改进对照与旁批、词汇表、完整记录。
@@ -373,5 +479,110 @@ enum DeepSeekReviewService {
     private static func durationString(_ interval: TimeInterval) -> String {
         let total = Int(interval)
         return String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+    }
+}
+
+// MARK: - DeepSeek 在线翻译
+
+/// 基于 DeepSeek 的实时在线翻译服务：质量优于系统离线翻译，且支持术语表强制遵循。
+/// 与审阅服务共用同一个 API Key。
+enum DeepSeekTranslationService {
+
+    private static let endpoint = URL(string: "https://api.deepseek.com/chat/completions")!
+    private static let model = "deepseek-v4-flash"
+    /// 单批提交的句子数上限（避免请求体过大、响应超时）。
+    private static let maxBatchSize = 20
+    private static let requestTimeout: TimeInterval = 45
+
+    /// 在线翻译响应结构。
+    private struct TranslationResponse: Codable {
+        let translations: [String]
+    }
+
+    /// 批量翻译英文句子为中文，严格遵循术语表。
+    /// - Parameter courseContext: 可选。传整节课的上下文说明（如"这些句子来自同一节课的连续课堂记录"），
+    ///   用于课后重新翻译时提示模型保持术语、人名与前后表达一致，获得比实时逐句翻译更好的质量。
+    static func translate(
+        _ sentences: [String],
+        glossary: [GlossaryTerm],
+        apiKey: String,
+        courseContext: String? = nil
+    ) async throws -> [String] {
+        guard !sentences.isEmpty else { return [] }
+        guard !apiKey.isEmpty else {
+            throw NSError(domain: "DeepSeekTranslation", code: -1, userInfo: [NSLocalizedDescriptionKey: "未配置 API Key"])
+        }
+
+        var systemPrompt = """
+        你是一位专业的中英文实时翻译引擎。将用户提供的英文句子翻译成简体中文。
+        要求：忠实原文、通顺自然、符合中文表达习惯，保留专有名词与数字。
+        """
+        if !glossary.isEmpty {
+            let glossaryLines = glossary.map { "\($0.source) → \($0.target)" }.joined(separator: "\n")
+            systemPrompt += "\n\n必须遵循以下用户自定义术语表：术语表中出现的英文词汇必须使用指定中文翻译，不得意译或省略：\n\(glossaryLines)"
+        }
+        if let courseContext, !courseContext.isEmpty {
+            systemPrompt += "\n\n\(courseContext)"
+        }
+        systemPrompt += "\n\n严格只输出 JSON，格式：{\"translations\":[\"译文1\",\"译文2\",...]}，译文数量必须与输入句子数量一致，不要输出任何其他文字或 markdown 标记。"
+
+        var results: [String] = []
+        for start in stride(from: 0, to: sentences.count, by: maxBatchSize) {
+            let batch = Array(sentences[start..<min(start + maxBatchSize, sentences.count)])
+            let userPrompt = "待翻译的英文句子：\n" + batch.enumerated()
+                .map { "[\($0.offset + 1)] \($0.element)" }
+                .joined(separator: "\n")
+
+            let body: [String: Any] = [
+                "model": model,
+                "messages": [
+                    ["role": "system", "content": systemPrompt],
+                    ["role": "user", "content": userPrompt],
+                ],
+                "temperature": 0.3,
+                "response_format": ["type": "json_object"],
+            ]
+
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.timeoutInterval = requestTimeout
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw NSError(domain: "DeepSeekTranslation", code: -2, userInfo: [NSLocalizedDescriptionKey: "网络请求失败"])
+            }
+            guard http.statusCode == 200 else {
+                let message = String(data: data, encoding: .utf8) ?? ""
+                throw NSError(
+                    domain: "DeepSeekTranslation",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "DeepSeek 翻译 API 错误（\(http.statusCode)）：\(message.prefix(160))"]
+                )
+            }
+
+            struct APIResponse: Codable {
+                struct Choice: Codable {
+                    struct Message: Codable { let content: String }
+                    let message: Message
+                }
+                let choices: [Choice]
+            }
+            let apiResponse = try JSONDecoder().decode(APIResponse.self, from: data)
+            guard let content = apiResponse.choices.first?.message.content,
+                  let resultData = content.data(using: .utf8) else {
+                throw NSError(domain: "DeepSeekTranslation", code: -3, userInfo: [NSLocalizedDescriptionKey: "未收到有效翻译结果"])
+            }
+            let parsed = try JSONDecoder().decode(TranslationResponse.self, from: resultData)
+            results.append(contentsOf: parsed.translations)
+        }
+
+        // 对齐数量：不足补空串，多余截断。
+        if results.count < sentences.count {
+            results.append(contentsOf: repeatElement("", count: sentences.count - results.count))
+        }
+        return Array(results.prefix(sentences.count))
     }
 }

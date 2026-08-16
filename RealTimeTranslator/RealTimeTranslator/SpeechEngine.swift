@@ -26,9 +26,26 @@ struct CourseSession: Identifiable, Equatable {
     let startDate: Date
     let endDate: Date
     let entries: [TranslationEntry]
+    /// 本节课同步保存的课堂录音文件地址（边录边存，可选）。
+    var recordingURL: URL?
 
     /// 课程时长（秒）。
     var duration: TimeInterval { endDate.timeIntervalSince(startDate) }
+}
+
+/// 翻译引擎类型：系统离线翻译（免费/无网可用）或 DeepSeek 在线翻译（质量更高、可遵循术语表）。
+enum TranslationEngine: String, CaseIterable, Identifiable {
+    case system
+    case deepseek
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .system: return "系统离线翻译"
+        case .deepseek: return "DeepSeek 在线翻译"
+        }
+    }
 }
 
 @MainActor
@@ -51,6 +68,15 @@ final class SpeechEngine: NSObject, ObservableObject {
     @Published private(set) var translationUnavailable = false
     /// 是否启用实时翻译（可在界面上开关）。
     @Published var isTranslationEnabled = true
+    /// 当前翻译引擎（可在设置中切换）。
+    @Published var translationEngine: TranslationEngine = .system
+    /// 术语表管理器（由界面注入，DeepSeek 翻译时强制遵循）。
+    var glossaryManager: GlossaryManager?
+
+    /// 注入术语表管理器（在 ContentView 初始化时调用）。
+    func setGlossaryManager(_ manager: GlossaryManager) {
+        glossaryManager = manager
+    }
 
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -59,6 +85,15 @@ final class SpeechEngine: NSObject, ObservableObject {
     private var forwarder: AudioForwarder?
     private var previousDefaultInputID: AudioDeviceID = 0
     private var finalText = ""
+
+    // MARK: - 课堂录音（边录边存）
+
+    /// 正在写入的课堂录音文件（与识别同源的 16kHz 单声道 Float32，CAF 容器）。
+    private var recordingFile: AVAudioFile?
+    /// 当前正在保存的课堂录音文件地址。
+    private(set) var currentRecordingURL: URL?
+    /// 最近一次已完成的课堂录音文件地址（供课程归档 / 课后回看）。
+    private(set) var lastRecordingURL: URL?
 
     // MARK: - 长时间运行（自动分段 / 自动恢复 / 计时）
 
@@ -255,6 +290,25 @@ final class SpeechEngine: NSObject, ObservableObject {
             try engine.start()
             Self.diag("AVAudioEngine.start() 成功")
 
+            // 2.1 边录边存：把课堂音频同步写入「桌面/课程记录/课堂录音」，
+            //     识别与录音共用同一份转换后的音频（16kHz 单声道 Float32）。
+            if let url = Self.recordingURL(start: courseStartDate ?? Date()) {
+                do {
+                    let file = try AVAudioFile(
+                        forWriting: url,
+                        settings: targetFormat.settings,
+                        commonFormat: .pcmFormatFloat32,
+                        interleaved: false
+                    )
+                    forwarder.recordingFile = file
+                    recordingFile = file
+                    currentRecordingURL = url
+                    Self.diag("课堂录音文件已创建: \(url.path)")
+                } catch {
+                    Self.diag("创建课堂录音文件失败: \(error)")
+                }
+            }
+
             audioEngine = engine
             recognitionRequest = request
             isRecording = true
@@ -298,11 +352,27 @@ final class SpeechEngine: NSObject, ObservableObject {
         recognitionRequest = nil
         recognitionTask?.cancel()
         recognitionTask = nil
+        forwarder?.recordingFile = nil
+        finalizeRecording()
         forwarder = nil
         restoreInput()
         isRecording = false
         level = 0
         audioActive = false
+    }
+
+    /// 收尾课堂录音：无有效音频数据时删除空文件，否则记为最近一次录音。
+    private func finalizeRecording() {
+        guard let file = recordingFile else { return }
+        if file.length > 0, let url = currentRecordingURL {
+            lastRecordingURL = url
+            Self.diag("课堂录音已保存: \(url.path)")
+        } else if let url = currentRecordingURL {
+            try? FileManager.default.removeItem(at: url)
+            Self.diag("课堂录音无音频数据，已删除: \(url.path)")
+        }
+        recordingFile = nil
+        currentRecordingURL = nil
     }
 
     // MARK: - 长时间运行保护
@@ -456,16 +526,18 @@ final class SpeechEngine: NSObject, ObservableObject {
         Self.diag("课程开始")
     }
 
-    /// 结束当前课程：归档本节课的翻译记录，供课后回看。
+    /// 结束当前课程：归档本节课的翻译记录与课堂录音，供课后回看。
     func endCourse() {
         guard isCourseActive, let start = courseStartDate else { return }
         let entries = translationEntries.filter { $0.timestamp >= start }
-        completedCourse = CourseSession(startDate: start, endDate: Date(), entries: entries)
+        var session = CourseSession(startDate: start, endDate: Date(), entries: entries)
+        session.recordingURL = currentRecordingURL ?? lastRecordingURL
+        completedCourse = session
         isCourseActive = false
         courseStartDate = nil
         courseTimerTask?.cancel()
         courseTimerTask = nil
-        Self.diag("课程结束，共记录 \(entries.count) 条翻译")
+        Self.diag("课程结束，共记录 \(entries.count) 条翻译，录音: \(session.recordingURL?.path ?? "无")")
     }
 
     private func startCourseTimer() {
@@ -491,9 +563,12 @@ final class SpeechEngine: NSObject, ObservableObject {
     /// `translatedSentenceKeys` 去重，避免识别修正导致重复翻译。
     private func updateTranslationIfNeeded(for text: String) {
         guard isTranslationEnabled else { return }
-        guard #available(macOS 15.0, *) else {
-            translationUnavailable = true
-            return
+        // 仅系统离线翻译依赖 macOS 15+ 与本地语言包；DeepSeek 在线翻译不依赖。
+        if translationEngine == .system {
+            guard #available(macOS 15.0, *) else {
+                translationUnavailable = true
+                return
+            }
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -529,7 +604,7 @@ final class SpeechEngine: NSObject, ObservableObject {
             }
             Self.diag("停顿判句，待翻译: \(toTranslate.joined(separator: " | "))")
             guard !toTranslate.isEmpty else { return }
-            await self.enqueueTranslation(toTranslate)
+            self.enqueueTranslation(toTranslate)
         }
     }
 
@@ -544,6 +619,11 @@ final class SpeechEngine: NSObject, ObservableObject {
     }
 
     private func translateSentences(_ sentences: [String]) async {
+        // DeepSeek 在线翻译：不依赖 macOS 15 与本地语言包，失败时自动降级为系统翻译。
+        if translationEngine == .deepseek {
+            await translateViaDeepSeek(sentences)
+            return
+        }
         guard #available(macOS 15.0, *) else { return }
         // 会话未就绪（视图层 .translationTask 尚未执行）时直接放弃本轮，等下一轮。
         guard let session = translationSessionBox as? TranslationSession else {
@@ -562,17 +642,7 @@ final class SpeechEngine: NSObject, ObservableObject {
         do {
             let results = try await service.translate(sentences, session: session)
             Self.diag("翻译完成: \(results.joined(separator: " | "))")
-            for (source, result) in zip(sentences, results) where !result.isEmpty {
-                translationEntries.append(TranslationEntry(timestamp: Date(), source: source, target: result))
-                // 上限保护：只保留最近 N 条，防止长时间运行内存膨胀。
-                if translationEntries.count > Self.maxTranslationEntries {
-                    translationEntries.removeFirst(translationEntries.count - Self.maxTranslationEntries)
-                }
-                if !translatedText.isEmpty {
-                    translatedText += "\n"
-                }
-                translatedText += result
-            }
+            appendTranslationResults(results, for: sentences)
         } catch {
             Self.diag("翻译失败: \(error)")
             if #available(macOS 26.0, *) {
@@ -587,6 +657,64 @@ final class SpeechEngine: NSObject, ObservableObject {
             }
         }
         isTranslating = false
+    }
+
+    /// DeepSeek 在线翻译：遵循术语表；失败时自动降级为系统离线翻译。
+    private func translateViaDeepSeek(_ sentences: [String]) async {
+        let key = DeepSeekReviewService.savedAPIKey
+        guard !key.isEmpty else {
+            lastError = "DeepSeek 在线翻译需要 API Key：请点击「翻译设置」填写后重试。"
+            return
+        }
+        isTranslating = true
+        Self.diag("DeepSeek 翻译: \(sentences.joined(separator: " | "))")
+        do {
+            let results = try await DeepSeekTranslationService.translate(
+                sentences,
+                glossary: glossaryManager?.terms ?? [],
+                apiKey: key
+            )
+            Self.diag("DeepSeek 翻译完成: \(results.joined(separator: " | "))")
+            appendTranslationResults(results, for: sentences)
+            isTranslating = false
+        } catch {
+            Self.diag("DeepSeek 翻译失败，尝试降级系统翻译: \(error)")
+            lastError = "DeepSeek 翻译失败，已自动切换为系统离线翻译：\(error.localizedDescription)"
+            isTranslating = false
+            // 降级到系统翻译，保证翻译不中断。
+            guard #available(macOS 15.0, *) else { return }
+            guard let session = translationSessionBox as? TranslationSession else { return }
+            let service: TranslationService
+            if let existing = translationServiceBox as? TranslationService {
+                service = existing
+            } else {
+                service = TranslationService()
+                translationServiceBox = service
+            }
+            isTranslating = true
+            do {
+                let results = try await service.translate(sentences, session: session)
+                appendTranslationResults(results, for: sentences)
+            } catch {
+                Self.diag("系统降级翻译也失败: \(error)")
+            }
+            isTranslating = false
+        }
+    }
+
+    /// 将翻译结果追加到记录与译文文本（带上限保护）。
+    private func appendTranslationResults(_ results: [String], for sentences: [String]) {
+        for (source, result) in zip(sentences, results) where !result.isEmpty {
+            translationEntries.append(TranslationEntry(timestamp: Date(), source: source, target: result))
+            // 上限保护：只保留最近 N 条，防止长时间运行内存膨胀。
+            if translationEntries.count > Self.maxTranslationEntries {
+                translationEntries.removeFirst(translationEntries.count - Self.maxTranslationEntries)
+            }
+            if !translatedText.isEmpty {
+                translatedText += "\n"
+            }
+            translatedText += result
+        }
     }
 
     /// 按句子终止符（. ! ? …）切分文本，返回句子列表（含结尾标点）。
@@ -635,6 +763,29 @@ final class SpeechEngine: NSObject, ObservableObject {
             }
         }
         return "识别错误：\(desc)"
+    }
+
+    // MARK: - 课堂录音文件路径
+
+    /// 生成课堂录音文件保存路径：`桌面/课程记录/课堂录音/yyyy-MM-dd HH-mm-ss 课堂录音.caf`。
+    private static func recordingURL(start: Date) -> URL? {
+        guard let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let dir = desktop
+            .appendingPathComponent("课程记录", isDirectory: true)
+            .appendingPathComponent("课堂录音", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            Self.diag("创建课堂录音目录失败: \(error)")
+            return nil
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        let name = "\(formatter.string(from: start)) 课堂录音.caf"
+        return dir.appendingPathComponent(name)
     }
 
     // MARK: - CoreAudio 设备管理
@@ -752,6 +903,8 @@ final class SpeechEngine: NSObject, ObservableObject {
 private final class AudioForwarder {
     var request: SFSpeechAudioBufferRecognitionRequest?
     var converter: AVAudioConverter?
+    /// 课堂录音文件（边录边存；与识别共用同一份转换后音频）。
+    var recordingFile: AVAudioFile?
     let targetFormat: AVAudioFormat
     var onLevel: ((Float) -> Void)?
     var onAudioActive: ((Bool) -> Void)?
@@ -786,6 +939,10 @@ private final class AudioForwarder {
             return
         }
         request.append(converted)
+        // 边录边存：写入课堂录音文件（AVAudioFile.write 立即拷贝数据，不阻塞识别）。
+        if let recordingFile {
+            try? recordingFile.write(from: converted)
+        }
         onLevel?(Self.computeLevel(converted))
         onAudioActive?(true)
     }

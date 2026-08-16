@@ -71,6 +71,8 @@ struct ContentView: View {
     @State private var photoPickerItem: PhotosPickerItem?
     @State private var isSubtitleVisible = false
     @State private var subtitlePanel: NSPanel?
+    @StateObject private var glossary = GlossaryManager()
+    @State private var isShowingTranslationSettings = false
 
     private static let subtitleFrameKey = "floatingSubtitleFrame"
 
@@ -84,6 +86,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 560, minHeight: 440)
         .task { deviceManager.refresh() }
+        .onAppear { engine.setGlossaryManager(glossary) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             // 退出时停止录音并恢复系统默认输入设备。
             engine.stop()
@@ -124,8 +127,11 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isShowingCourseReview) {
             if let course = engine.completedCourse {
-                CourseReviewView(course: course)
+                CourseReviewView(course: course, glossaryTerms: glossary.terms)
             }
+        }
+        .sheet(isPresented: $isShowingTranslationSettings) {
+            TranslationSettingsView(engine: engine, glossary: glossary)
         }
     }
 
@@ -169,6 +175,8 @@ struct ContentView: View {
 
             subtitleToggleButton
 
+            settingsButton
+
             backgroundMenu
 
             StatusBadge(isRecording: engine.isRecording)
@@ -198,6 +206,20 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help("弹出 / 收起悬浮字幕窗（仅显示最近两句）")
+    }
+
+    /// 翻译设置入口：翻译引擎选择 / DeepSeek API Key / 术语表。
+    private var settingsButton: some View {
+        Button {
+            isShowingTranslationSettings = true
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.body)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("翻译设置：翻译引擎 / API Key / 术语表")
     }
 
     /// 背景设置菜单：从相册选择 / 从文件选择 / 恢复默认。
@@ -907,19 +929,242 @@ private struct TranslationRow: View {
     }
 }
 
+/// 翻译设置弹窗：翻译引擎切换 / DeepSeek API Key / 术语表管理（手动添加或从 Markdown 词库导入）。
+private struct TranslationSettingsView: View {
+    @ObservedObject var engine: SpeechEngine
+    @ObservedObject var glossary: GlossaryManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var apiKey = DeepSeekReviewService.savedAPIKey
+    @State private var newSource = ""
+    @State private var newTarget = ""
+    @State private var importMessage: String?
+
+    private var trimmedSource: String { newSource.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedTarget: String { newTarget.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
+        }
+        .frame(width: 500, height: 560)
+        .background(Color(red: 0.05, green: 0.06, blue: 0.12))
+    }
+
+    private var header: some View {
+        HStack {
+            Label("翻译设置", systemImage: "gearshape.2.fill")
+                .font(.title3.bold())
+                .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+            Spacer()
+            Button("完成") {
+                dismiss()
+            }
+            .keyboardShortcut(.escape, modifiers: [])
+        }
+        .padding(16)
+    }
+
+    private var content: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                engineSection
+                apiKeySection
+                glossarySection
+            }
+            .padding(16)
+        }
+    }
+
+    // MARK: 翻译引擎
+
+    private var engineSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("翻译引擎")
+                .font(.headline)
+            Picker("翻译引擎", selection: $engine.translationEngine) {
+                ForEach(TranslationEngine.allCases) { item in
+                    Text(item.displayName).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            Text("系统离线翻译：免费、无网可用、数据不出本机，但需 macOS 15+ 且质量一般。\nDeepSeek 在线翻译：翻译质量更高，可严格遵循下方术语表，需联网并配置 API Key。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: API Key
+
+    private var apiKeySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("DeepSeek API Key")
+                .font(.headline)
+            SecureField("sk-...", text: $apiKey)
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: apiKey) { _, newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        DeepSeekReviewService.savedAPIKey = trimmed
+                    }
+                }
+            Text("用于「DeepSeek 在线翻译」与「课程审阅」。key 仅保存在本机（UserDefaults）。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: 术语表
+
+    private var glossarySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("术语表")
+                    .font(.headline)
+                Spacer()
+                Text("\(glossary.terms.count) 条")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                TextField("英文术语", text: $newSource)
+                    .textFieldStyle(.roundedBorder)
+                TextField("中文译名", text: $newTarget)
+                    .textFieldStyle(.roundedBorder)
+                Button {
+                    addTerm()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .disabled(trimmedSource.isEmpty || trimmedTarget.isEmpty)
+                .help("添加术语")
+            }
+            if glossary.terms.isEmpty {
+                Text("暂无术语。DeepSeek 在线翻译时会强制遵循术语表，提升专业词汇译文一致性。")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(glossary.terms) { term in
+                        HStack {
+                            Text(term.source)
+                                .font(.system(.body, design: .rounded).bold())
+                                .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+                            Image(systemName: "arrow.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(term.target)
+                                .font(.body)
+                            Spacer()
+                            Button {
+                                glossary.remove(term)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("删除术语")
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(red: 1.0, green: 0.23, blue: 0.58).opacity(0.35), lineWidth: 1)
+                        )
+                    }
+                }
+            }
+            HStack(spacing: 10) {
+                Button {
+                    importGlossary()
+                } label: {
+                    Label("从 Markdown 词库导入…", systemImage: "square.and.arrow.down")
+                }
+                Button {
+                    glossary.clear()
+                } label: {
+                    Label("清空全部", systemImage: "trash")
+                        .foregroundStyle(.red)
+                }
+                .disabled(glossary.terms.isEmpty)
+            }
+            if let importMessage {
+                Text(importMessage)
+                    .font(.caption)
+                    .foregroundStyle(Color(red: 0.0, green: 0.90, blue: 1.0))
+            }
+        }
+    }
+
+    // MARK: 动作
+
+    private func addTerm() {
+        glossary.add(source: trimmedSource, target: trimmedTarget)
+        newSource = ""
+        newTarget = ""
+    }
+
+    private func importGlossary() {
+        let panel = NSOpenPanel()
+        var contentTypes: [UTType] = [.plainText]
+        if let markdownType = UTType(filenameExtension: "md") {
+            contentTypes.append(markdownType)
+        }
+        panel.allowedContentTypes = contentTypes
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "选择 Markdown 词库（表格格式：| 英文 | 中文 | 注释 |）"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let count = glossary.importFromMarkdown(url: url)
+        importMessage = count > 0
+            ? "导入成功：新增 \(count) 条术语。"
+            : "没有导入任何术语（文件为空、格式不符或术语已存在）。"
+    }
+}
+
 /// 课程回看弹窗：展示本节课完整翻译记录，并可调用 DeepSeek 审阅生成文档。
 private struct CourseReviewView: View {
-    let course: CourseSession
+    /// 当前回看的课程（重新翻译后同步更新其译文）。
+    @State private var course: CourseSession
+    /// 术语表（重新翻译时注入，保持术语一致）。
+    let glossaryTerms: [GlossaryTerm]
     @Environment(\.dismiss) private var dismiss
     @AppStorage("deepseek_api_key") private var apiKey = ""
     @State private var isReviewing = false
     @State private var reviewState: ReviewState = .idle
+    @State private var isRetranslating = false
+    @State private var retranslateState: RetranslateState = .idle
+    @State private var audioPlayer: AVAudioPlayer?
+    @State private var isPlayingRecording = false
+    @State private var playbackPosition: TimeInterval = 0
+    @State private var playbackDuration: TimeInterval = 0
+    @State private var playbackTimer: Timer?
 
     enum ReviewState {
         case idle
         case working
         case done(URL)
         case failed(String)
+    }
+
+    enum RetranslateState {
+        case idle
+        case working
+        case done(Int)
+        case failed(String)
+    }
+
+    init(course: CourseSession, glossaryTerms: [GlossaryTerm]) {
+        _course = State(initialValue: course)
+        self.glossaryTerms = glossaryTerms
+    }
+
+    /// 本节课是否有可用的课堂录音文件。
+    private var recordingExists: Bool {
+        guard let url = course.recordingURL else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
     }
 
     var body: some View {
@@ -938,6 +1183,10 @@ private struct CourseReviewView: View {
             }
             .padding(16)
             Divider()
+            if recordingExists {
+                recordingBar
+                Divider()
+            }
             HStack(spacing: 0) {
                 entriesList
                 Divider()
@@ -949,6 +1198,78 @@ private struct CourseReviewView: View {
             // 每次打开弹窗时同步已保存的 API Key。
             apiKey = DeepSeekReviewService.savedAPIKey
         }
+        .onDisappear {
+            audioPlayer?.stop()
+            playbackTimer?.invalidate()
+        }
+    }
+
+    /// 课堂录音控制条：播放/暂停、进度、在访达中显示。
+    private var recordingBar: some View {
+        HStack(spacing: 12) {
+            Image(systemName: isPlayingRecording ? "pause.fill" : "play.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(isPlayingRecording ? .red : .blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("课堂录音（边录边存，可重听）")
+                    .font(.caption.bold())
+                Text(playbackDuration > 0
+                     ? "\(Self.durationString(playbackPosition)) / \(Self.durationString(playbackDuration))"
+                     : (course.recordingURL?.lastPathComponent ?? ""))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if playbackDuration > 0 {
+                ProgressView(value: playbackPosition, total: max(playbackDuration, 0.001))
+                    .frame(maxWidth: 240)
+            }
+            Spacer()
+            Button(isPlayingRecording ? "暂停" : "播放录音") {
+                togglePlayback()
+            }
+            Button("在访达中显示") {
+                revealRecording()
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.blue.opacity(0.06))
+    }
+
+    private func togglePlayback() {
+        guard let url = course.recordingURL else { return }
+        if isPlayingRecording {
+            audioPlayer?.pause()
+            playbackTimer?.invalidate()
+            isPlayingRecording = false
+            return
+        }
+        do {
+            let player = try AVAudioPlayer(contentsOf: url)
+            audioPlayer = player
+            player.prepareToPlay()
+            playbackDuration = player.duration
+            playbackPosition = 0
+            player.play()
+            isPlayingRecording = true
+            playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+                let current = audioPlayer?.currentTime ?? 0
+                playbackPosition = current
+                if let player = audioPlayer, !player.isPlaying, isPlayingRecording {
+                    isPlayingRecording = false
+                    playbackPosition = player.duration
+                    playbackTimer?.invalidate()
+                }
+            }
+        } catch {
+            reviewState = .failed("无法播放录音：\(error.localizedDescription)")
+        }
+    }
+
+    private func revealRecording() {
+        guard let url = course.recordingURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     /// 左侧：完整翻译记录列表。
@@ -1003,6 +1324,36 @@ private struct CourseReviewView: View {
             .onChange(of: apiKey) { _, newValue in
                 DeepSeekReviewService.savedAPIKey = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             }
+
+            Divider()
+
+            Label("课后重新翻译", systemImage: "arrow.triangle.2.circlepath")
+                .font(.headline)
+            Text("把本节课 \(course.entries.count) 条英文原文一次性批量交给 DeepSeek 重新翻译（带整课上下文与术语表），译文质量优于实时逐句翻译；重新翻译后可再次生成审阅文档。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                retranslate()
+            } label: {
+                if isRetranslating {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("重新翻译中…")
+                    }
+                } else {
+                    Label("重新翻译本课（DeepSeek）", systemImage: "arrow.triangle.2.circlepath")
+                }
+            }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity)
+            .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isRetranslating || course.entries.isEmpty)
+
+            retranslateStateView
+
+            Divider()
 
             Button {
                 startReview()
@@ -1108,6 +1459,75 @@ private struct CourseReviewView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.red.opacity(0.08))
             .cornerRadius(8)
+        }
+    }
+
+    @ViewBuilder
+    private var retranslateStateView: some View {
+        switch retranslateState {
+        case .idle, .working:
+            EmptyView()
+        case .done(let count):
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("重新翻译完成，已更新 \(count) 条译文（可再次生成审阅文档）")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.green.opacity(0.08))
+            .cornerRadius(8)
+        case .failed(let message):
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "xmark.octagon.fill")
+                    .foregroundStyle(.red)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.red.opacity(0.08))
+            .cornerRadius(8)
+        }
+    }
+
+    /// 课后重新翻译：把整节课英文原文一次性批量交给 DeepSeek，
+    /// 带整课上下文与术语表，获得比实时逐句翻译更好的质量。
+    private func retranslate() {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !isRetranslating, !course.entries.isEmpty else { return }
+        isRetranslating = true
+        retranslateState = .working
+        let sentences = course.entries.map(\.source)
+        Task {
+            do {
+                let context = "这些句子来自同一节英语课的连续课堂记录，按时间顺序排列。" +
+                    "请结合整节课的上下文进行翻译，保持术语、人名与表达前后一致，避免逐句生硬直译，使整体连贯自然。"
+                let results = try await DeepSeekTranslationService.translate(
+                    sentences, glossary: glossaryTerms, apiKey: key, courseContext: context)
+                let updated = zip(course.entries, results).map { entry, target in
+                    TranslationEntry(
+                        timestamp: entry.timestamp,
+                        source: entry.source,
+                        target: target.isEmpty ? entry.target : target
+                    )
+                }
+                course = CourseSession(
+                    startDate: course.startDate,
+                    endDate: course.endDate,
+                    entries: updated,
+                    recordingURL: course.recordingURL
+                )
+                retranslateState = .done(updated.count)
+            } catch {
+                retranslateState = .failed("重新翻译失败：\(error.localizedDescription)")
+            }
+            isRetranslating = false
         }
     }
 
