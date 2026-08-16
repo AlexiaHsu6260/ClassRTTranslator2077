@@ -310,10 +310,7 @@ final class SpeechEngine: NSObject, ObservableObject {
     }
     /// 已翻译句子的原文集合（去重，避免识别修正导致重复翻译）。
     private var translatedSentenceKeys: Set<String> = []
-    /// 上一次 VAD 停顿时翻译过的开放句原文，用于计算下一次停顿的"新增后缀"，
-    /// 避免教授连续说话时同一段内容被反复从头翻译。
-    private var lastOpenSentence: String = ""
-    /// 防抖任务：识别停止一段时间后才翻译，避免随每帧识别结果抖动。
+    /// 停顿判句翻译任务：VAD 静音停顿确认后，延迟一小段让识别结果稳定再翻译。
     private var translationDebounceTask: Task<Void, Never>?
     /// 翻译串行链：保证翻译按顺序执行，避免并发导致译文乱序。
     private var translationChain: Task<Void, Never>?
@@ -432,9 +429,6 @@ final class SpeechEngine: NSObject, ObservableObject {
             return
         }
         Self.diag("所选设备 \(deviceID) → CoreAudio id=\(audioDeviceID)")
-
-        // 开始新的识别流，重置开放句累计状态。
-        lastOpenSentence = ""
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -594,10 +588,7 @@ final class SpeechEngine: NSObject, ObservableObject {
             let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 let (pending, openSentence) = collectPendingSentences(trimmed, includeOpen: true)
-                finalizeSentenceTranslation(pending, openSentence: nil)
-                if let openSentence {
-                    finalizeOpenSentenceIncrement(openSentence)
-                }
+                finalizeSentenceTranslation(pending, openSentence: openSentence)
             }
         }
         finalizeRecording()
@@ -625,13 +616,12 @@ final class SpeechEngine: NSObject, ObservableObject {
     // MARK: - 长时间运行保护
 
     /// 统一的识别结果回调处理：更新文本、触发增量翻译、处理结束/异常。
-    /// - 正常 partial：刷新 recognizedText 并触发停顿判句翻译。
-    /// - isFinal：把本段文本固化进 finalText，再按当前模式（分段/结束）处理。
+    /// - 正常 partial：仅刷新 recognizedText（翻译由 VAD 停顿判句触发，不在识别中提前翻译）。
+    /// - isFinal：把本段文本固化进 finalText，做一次收尾兜底翻译，再按当前模式（分段/结束）处理。
     /// - 非用户主动停止的错误：自动重连新分段。
     private func handleRecognitionResult(_ result: SFSpeechRecognitionResult?, error: Error?) {
         if let result {
             recognizedText = finalText + result.bestTranscription.formattedString
-            updateTranslationIfNeeded(for: recognizedText)
         }
         if let error {
             lastError = friendlyMessage(for: error)
@@ -642,7 +632,7 @@ final class SpeechEngine: NSObject, ObservableObject {
         if let result {
             finalText += result.bestTranscription.formattedString
             recognizedText = finalText
-            updateTranslationIfNeeded(for: recognizedText)
+            finalizeTranslationOnSegmentEnd()
         }
         recognitionRequest = nil
         recognitionTask = nil
@@ -751,7 +741,6 @@ final class SpeechEngine: NSObject, ObservableObject {
         recognizedText = ""
         translatedText = ""
         translatedSentenceKeys.removeAll()
-        lastOpenSentence = ""
         translationDebounceTask?.cancel()
         translationDebounceTask = nil
         translationChain?.cancel()
@@ -848,46 +837,28 @@ final class SpeechEngine: NSObject, ObservableObject {
 
     // MARK: - 翻译
 
-    /// 根据最新识别文本，找出"已说完的完整句子"并增量翻译。
+    /// 识别段（isFinal / 错误）结束时的收尾兜底翻译。
     ///
-    /// 本地语音识别的结果通常**不带标点**，因此不能依赖句号/问号判断句子结束，
-    /// 改为「停顿判句」：识别文本稳定约 1.2 秒（用户说完一句话的自然停顿）即视为
-    /// 一句话结束并翻译；带终止标点的句子则立即按句翻译。已翻译的句子通过
-    /// 归一化后的 `translatedSentenceKeys` 去重，避免识别修正导致重复翻译。
-    ///
-    /// 注意：文本防抖期间只翻译已确认的完整句；仍在变化的"开放句"（未终止）
-    /// 交给 VAD 检测到的真实停顿时再翻译，避免识别结果逐字补充时同一句被反复输出。
-    private func updateTranslationIfNeeded(for text: String) {
+    /// 正常翻译完全由 VAD 停顿（静音 0.9 秒 = 一句话说完）触发，翻译严格发生在停顿之后，
+    /// 不会在说话过程中提前翻译。此处仅兜底：识别段结束时把尚未翻译的句子补翻，
+    /// 已翻译内容由归一化 key 去重，不会重复输出。
+    private func finalizeTranslationOnSegmentEnd() {
         guard isTranslationEnabled else { return }
-        // 仅系统离线翻译依赖 macOS 15+ 与本地语言包；DeepSeek 在线翻译不依赖。
         if translationEngine == .system {
             guard #available(macOS 15.0, *) else {
                 translationUnavailable = true
                 return
             }
         }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-
-        // 先收集已明确的完整句子（带终止标点，或非最后一段），延迟到停顿确认后再翻译。
-        let (pending, _) = collectPendingSentences(trimmed, includeOpen: false)
-
-        translationDebounceTask?.cancel()
-        translationDebounceTask = Task { @MainActor [weak self] in
-            // 长防抖：用户停顿 ≈ 一句话结束（识别结果一般不带标点）。
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            guard let self, !Task.isCancelled else { return }
-            // 防抖期间识别文本又被更新 → 还在说话，本轮跳过，等下一轮。
-            if self.recognizedText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmed { return }
-            // 文本防抖只翻译已确认的完整句；开放句留给 VAD 的真实停顿触发，
-            // 避免识别结果逐字补充时同一句被反复翻译。
-            self.finalizeSentenceTranslation(pending, openSentence: nil)
-        }
+        let (pending, openSentence) = collectPendingSentences(trimmed, includeOpen: true)
+        finalizeSentenceTranslation(pending, openSentence: openSentence)
     }
 
-    /// 音频级 VAD（静音检测）触发的停顿：静音持续约 0.9 秒视为"一句话说完"。
+    /// 音频级 VAD（静音检测）触发的停顿：静音持续约 0.9 秒视为"一句话说完"（断句）。
     /// 给识别引擎约 0.4 秒收尾（让最终结果稳定、标点落定），再按停顿判句翻译，
-    /// 比纯文本防抖更快、更贴近真实停顿；收尾期间文本被更新则让位于下一轮识别。
+    /// 翻译严格跟随真实停顿，不在说话过程中提前翻译；收尾期间文本被更新则让位于下一轮。
     private func handlePauseDetected() {
         guard isTranslationEnabled, isRecording else { return }
         let trimmed = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -896,15 +867,12 @@ final class SpeechEngine: NSObject, ObservableObject {
         translationDebounceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard let self, !Task.isCancelled else { return }
-            // 收尾期间文本又被更新 → 识别仍在修正，本轮跳过，等下一轮（防抖会兜底）。
+            // 收尾期间文本又被更新 → 识别仍在修正，本轮跳过，等下一轮识别。
             if self.recognizedText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmed { return }
-            // 停顿即句界：已确认的完整句直接翻译；仍在变化的开放句只翻译
-            // 相对于上一次停顿的"新增后缀"，避免教授连续说话时同一段被反复输出。
+            // 停顿即句界：把当前"已确认完整句 + 停顿末句"一并翻译，
+            // 归一化 key 去重保证同一句不会因识别修正被重复翻译。
             let (pending, openSentence) = self.collectPendingSentences(trimmed, includeOpen: true)
-            self.finalizeSentenceTranslation(pending, openSentence: nil)
-            if let openSentence {
-                self.finalizeOpenSentenceIncrement(openSentence)
-            }
+            self.finalizeSentenceTranslation(pending, openSentence: openSentence)
         }
     }
 
@@ -942,17 +910,15 @@ final class SpeechEngine: NSObject, ObservableObject {
             .joined(separator: " ")
     }
 
-    /// 提交一批已确认的完整句子翻译。
+    /// 提交一批待翻译句子（`pending` 为已确认句，`openSentence` 为停顿判句时的末句）。
     /// 每句会带上其在课堂录音中的起始偏移（audioTime），供回看跳转与字幕导出使用。
     private func finalizeSentenceTranslation(_ pending: [String], openSentence: String?) {
         var toTranslate = pending
         if let openSentence, !openSentence.isEmpty {
-            // 兜底：极少数情况下外部仍传入开放句时，按完整句去重翻译。
             let key = Self.translationKey(for: openSentence)
-            if !translatedSentenceKeys.contains(key) {
-                translatedSentenceKeys.insert(key)
-                toTranslate.append(openSentence)
-            }
+            guard !translatedSentenceKeys.contains(key) else { return }
+            translatedSentenceKeys.insert(key)
+            toTranslate.append(openSentence)
         }
         guard !toTranslate.isEmpty else { return }
 
@@ -961,41 +927,6 @@ final class SpeechEngine: NSObject, ObservableObject {
         let audioTimes = Array(repeating: recordingOffset, count: toTranslate.count)
         Self.diag("停顿判句，待翻译: \(toTranslate.joined(separator: " | "))")
         enqueueTranslation(toTranslate, audioTimes: audioTimes)
-    }
-
-    /// 提交开放句（未终止文本）的**增量后缀**翻译。
-    ///
-    /// VAD 检测到的真实停顿时，语音识别可能仍在补充同一段话。若直接翻译整段开放句，
-    /// 会导致"You can change..."这类基础句被反复输出。这里只取当前开放句相对于
-    /// 上一次停顿时的新增后缀进行翻译，大幅提升连续长句场景下的体验。
-    private func finalizeOpenSentenceIncrement(_ openSentence: String) {
-        let current = openSentence.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !current.isEmpty else { return }
-        let last = lastOpenSentence.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let increment: String
-        if last.isEmpty {
-            increment = current
-        } else if current.hasPrefix(last) {
-            increment = String(current.dropFirst(last.count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            // 发生识别修正或跳变（如 lastOpenSentence 前缀与当前不一致），
-            // 回退为翻译整个当前开放句；小幅重复优于漏译。
-            increment = current
-        }
-
-        guard !increment.isEmpty else { return }
-        let key = Self.translationKey(for: increment)
-        guard !translatedSentenceKeys.contains(key) else { return }
-        translatedSentenceKeys.insert(key)
-
-        let recordingOffset = currentRecordingTime - Self.recognitionLagCompensation
-        Self.diag("开放句增量翻译: \(increment)")
-        enqueueTranslation([increment], audioTimes: [recordingOffset])
-
-        // 记录本次开放句，供下一次停顿计算新增后缀。
-        lastOpenSentence = current
     }
 
     /// 当前录音文件已写入的时长（秒），0 表示未在录音。
