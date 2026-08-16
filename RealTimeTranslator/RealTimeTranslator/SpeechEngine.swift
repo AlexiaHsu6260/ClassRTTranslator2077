@@ -205,9 +205,34 @@ final class SpeechEngine: NSObject, ObservableObject {
             Self.diag("麦克风权限已授权")
         }
 
+        // 0.5 语音识别权限：与麦克风权限相互独立。
+        // 当「系统设置 → Siri 和听写」中关闭「听写」时，系统不会弹出授权框、
+        // 也不会回调授权结果，识别会静默失败——这里主动请求并用超时判定听写是否开启。
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .notDetermined:
+            Self.diag("语音识别权限 notDetermined，主动请求…")
+            let sem = DispatchSemaphore(value: 0)
+            SFSpeechRecognizer.requestAuthorization { _ in
+                Self.diag("语音识别授权回调")
+                sem.signal()
+            }
+            let timedOut = sem.wait(timeout: .now() + 1.5) == .timedOut
+            if timedOut {
+                Self.diag("语音识别授权请求超时：疑似「听写」未开启")
+                lastError = "语音识别不可用：请先在「系统设置 → Siri 和听写」中开启「听写」，再点「开始」重试。"
+                return
+            }
+        case .denied, .restricted:
+            lastError = "语音识别权限未开启：请在「系统设置 → 隐私与安全性 → 语音识别」中允许本应用，并确认「系统设置 → Siri 和听写」中的「听写」已开启。"
+            Self.diag("语音识别权限 denied/restricted")
+            return
+        default:
+            Self.diag("语音识别权限已授权")
+        }
+
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
-            lastError = "语音识别不可用，请到「系统设置 → 隐私与安全性 → 语音识别」确认已开启并下载英语语言包。"
-            Self.diag("语音识别器不可用")
+            lastError = "语音识别不可用：请确认「系统设置 → Siri 和听写」中的「听写」已开启、本应用已获语音识别权限，并已下载英语语言包（如缺失，系统设置 → 通用 → 翻译 中可管理语言包）。"
+            Self.diag("语音识别器不可用（isAvailable=false）")
             return
         }
         guard let audioDeviceID = Self.audioDeviceID(for: deviceID) else {
@@ -328,6 +353,15 @@ final class SpeechEngine: NSObject, ObservableObject {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self, self.isRecording, !self.audioActive else { return }
                 self.lastError = "3 秒内未采集到音频：请确认「系统设置 → 隐私与安全性 → 麦克风」已允许本应用（如未出现授权弹窗，请先在系统设置中手动添加本应用），并确认输入音量不为 0。"
+            }
+
+            // 3.5 识别无结果检测：音频流正常但 8 秒内没有任何识别结果，
+            //     通常是「系统设置 → Siri 和听写」中「听写」未开启导致的静默失败。
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard let self, self.isRecording, self.audioActive, self.lastError == nil else { return }
+                guard self.recognizedText.isEmpty else { return }
+                self.lastError = "已采集到音频但未产生识别结果：请到「系统设置 → Siri 和听写」确认「听写」已开启（若已开启，先关闭再重新打开以重新初始化语音识别），并确认已下载英语语言包。"
             }
         } catch {
             restoreInput()

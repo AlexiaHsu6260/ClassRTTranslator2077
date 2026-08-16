@@ -42,15 +42,25 @@ final class PermissionManager: ObservableObject {
     }
 
     /// 依次请求麦克风与语音识别权限，全部完成后刷新状态。
+    /// 注意：当「系统设置 → Siri 和听写」中关闭「听写」时，系统不会回调授权结果，
+    /// 这里带超时兜底，避免授权页永远转圈。
     func requestAll() async {
         if microphoneStatus != .granted {
             _ = await AVCaptureDevice.requestAccess(for: .audio)
         }
         if speechStatus != .granted {
-            await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { _ in
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let lock = NSLock()
+                var resumed = false
+                func resumeOnce() {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !resumed else { return }
+                    resumed = true
                     continuation.resume()
                 }
+                SFSpeechRecognizer.requestAuthorization { _ in resumeOnce() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { resumeOnce() }
             }
         }
         refreshStatus()
@@ -62,7 +72,7 @@ final class PermissionManager: ObservableObject {
             return "麦克风权限被拒绝，请在 系统设置 → 隐私与安全性 → 麦克风 中允许本应用。"
         }
         if speechStatus == .denied {
-            return "语音识别权限被拒绝，请在 系统设置 → 隐私与安全性 → 语音识别 中允许本应用。"
+            return "语音识别权限被拒绝：请在「系统设置 → 隐私与安全性 → 语音识别」中允许本应用，并确认「系统设置 → Siri 和听写」中的「听写」已开启。"
         }
         return nil
     }
