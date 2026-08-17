@@ -640,18 +640,22 @@ struct ContentView: View {
                                     .foregroundStyle(.orange)
                             }
                             LazyVStack(alignment: .leading, spacing: 8) {
-                                // 已翻译句子：原文在上、译文紧跟其下
+                                // 已翻译句子：原文在上、译文紧跟其下（各最多保留 5 行，超出省略）
                                 ForEach(engine.translationEntries) { entry in
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(entry.source)
                                             .font(.system(size: 17, design: .rounded))
                                             .foregroundStyle(.secondary)
                                             .lineSpacing(4)
+                                            .lineLimit(5)
+                                            .truncationMode(.tail)
                                             .textSelection(.enabled)
                                         Text(entry.target)
                                             .font(.system(size: 19, weight: .medium, design: .rounded))
                                             .foregroundStyle(.primary)
                                             .lineSpacing(4)
+                                            .lineLimit(5)
+                                            .truncationMode(.tail)
                                             .textSelection(.enabled)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)

@@ -934,21 +934,52 @@ final class SpeechEngine: NSObject, ObservableObject {
 
     /// 提交一批待翻译句子（`pending` 为已确认句，`openSentence` 为停顿判句时的末句）。
     /// 每句会带上其在课堂录音中的起始偏移（audioTime），供回看跳转与字幕导出使用。
+    /// 长难句在此按逗号为间隔拆分为若干子句，各自翻译并逐条显示。
     private func finalizeSentenceTranslation(_ pending: [String], openSentence: String?) {
         var toTranslate = pending
         if let openSentence, !openSentence.isEmpty {
-            let key = Self.translationKey(for: openSentence)
-            guard !translatedSentenceKeys.contains(key) else { return }
-            translatedSentenceKeys.insert(key)
             toTranslate.append(openSentence)
         }
         guard !toTranslate.isEmpty else { return }
 
+        // 长难句以逗号为间隔拆分：每句展开为若干短子句，分别翻译、逐条显示。
+        // 子句级去重 key 沿用整句归一化规则，保证识别修正不产生重复翻译。
+        var expanded: [String] = []
+        for sentence in toTranslate {
+            for clause in Self.expandLongSentence(sentence) {
+                let key = Self.translationKey(for: clause)
+                guard !translatedSentenceKeys.contains(key) else { continue }
+                translatedSentenceKeys.insert(key)
+                expanded.append(clause)
+            }
+        }
+        guard !expanded.isEmpty else { return }
+
         // 该句在录音中的近似起始偏移：识别结果通常滞后于真实语音约 1.5 秒，向前补偿。
         let recordingOffset = currentRecordingTime - Self.recognitionLagCompensation
-        let audioTimes = Array(repeating: recordingOffset, count: toTranslate.count)
-        Self.diag("停顿判句，待翻译: \(toTranslate.joined(separator: " | "))")
-        enqueueTranslation(toTranslate, audioTimes: audioTimes)
+        let audioTimes = Array(repeating: recordingOffset, count: expanded.count)
+        Self.diag("停顿判句，待翻译: \(expanded.joined(separator: " | "))")
+        enqueueTranslation(expanded, audioTimes: audioTimes)
+    }
+
+    /// 长难句按逗号为间隔拆分为若干子句分别翻译。
+    /// 短句保持整句翻译；含逗号且长度达到阈值的句子按逗号拆分，
+    /// 每个子句单独成为一条原文/译文配对，翻译更准确、界面更整齐。
+    private static func expandLongSentence(_ sentence: String) -> [String] {
+        let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        // 长难句判定：字符数 ≥ 80 或单词数 ≥ 15，且含逗号（支持中英文逗号）。
+        let isLong = trimmed.count >= 80
+            || trimmed.split(whereSeparator: { $0.isWhitespace }).count >= 15
+        guard isLong, trimmed.contains(",") || trimmed.contains("，") else { return [trimmed] }
+
+        let clauses = trimmed
+            .split { $0 == "," || $0 == "，" }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard clauses.count >= 2 else { return [trimmed] }
+        return clauses
     }
 
     /// 当前录音文件已写入的时长（秒），0 表示未在录音。
