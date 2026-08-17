@@ -898,8 +898,11 @@ final class SpeechEngine: NSObject, ObservableObject {
         }
     }
 
-    /// 从文本中收集"已确认的完整句子"（带终止标点，或非最后一段），并去重。
+    /// 从文本中收集"已确认的完整句子"（带终止标点，或非最后一段）。
     /// `includeOpen` 为 true 时同时返回最后一段未终止的文本（停顿即句界）。
+    /// 注意：这里只收集、不插入去重 key。去重统一在 finalizeSentenceTranslation
+    /// 中对拆分后的每个子句进行，避免「整句 key 先被插入、子句再查重」导致
+    /// 普通句子（不拆分的短句/中等句）全部被误判为已翻译而跳过。
     private func collectPendingSentences(_ text: String, includeOpen: Bool) -> ([String], String?) {
         let sentences = Self.splitIntoSentences(text)
         var pending: [String] = []
@@ -908,9 +911,6 @@ final class SpeechEngine: NSObject, ObservableObject {
             let t = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { continue }
             if i < sentences.count - 1 || Self.endsWithTerminalPunctuation(sentence) {
-                let key = Self.translationKey(for: t)
-                guard !translatedSentenceKeys.contains(key) else { continue }
-                translatedSentenceKeys.insert(key)
                 pending.append(t)
             } else if includeOpen {
                 openSentence = t
