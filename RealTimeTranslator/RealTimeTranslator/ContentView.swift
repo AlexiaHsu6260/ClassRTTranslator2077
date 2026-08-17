@@ -610,68 +610,75 @@ struct ContentView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    // 英文原文区
-                    VStack(alignment: .leading, spacing: 8) {
+                    // 原文与译文逐句配对区：翻译紧跟原文下方，不再分为两个独立区域
+                    VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 6) {
-                            Image(systemName: "textformat")
+                            Image(systemName: "character.bubble")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Text("英语识别")
+                            Text(engine.isTranslationEnabled ? "英语识别与中文翻译" : "英语识别")
                                 .font(.caption.bold())
                                 .foregroundStyle(.secondary)
+                            if engine.isTranslating {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            }
                             Spacer()
+                            if engine.isTranslationEnabled {
+                                Text("译文紧随原文")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
                         if engine.recognizedText.isEmpty {
                             emptyHint
                                 .id("empty")
                         } else {
-                            Text(engine.recognizedText)
-                                .font(.system(size: 19, design: .rounded))
-                                .lineSpacing(6)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id("text")
-                            if engine.isRecording {
-                                Text("▍")
-                                    .font(.system(size: 19))
-                                    .foregroundStyle(.tint)
-                                    .transition(.opacity)
-                                    .id("cursor")
-                            }
-                        }
-                    }
-                    .padding(16)
-
-                    // 中文翻译区（仅显示最近 1 分钟，其余保留待课后回看）
-                    if engine.isTranslationEnabled {
-                        Divider()
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "character.bubble")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text("中文翻译（最近 1 分钟）")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.secondary)
-                                if engine.isTranslating {
-                                    ProgressView()
-                                        .controlSize(.mini)
-                                }
-                                Spacer()
-                            }
                             if engine.translationUnavailable {
                                 Text("翻译功能需要 macOS 15 或更高版本。")
                                     .font(.callout)
                                     .foregroundStyle(.orange)
-                            } else {
-                                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                                    RecentTranslationList(entries: recentTranslationEntries)
-                                        .id("translation")
+                            }
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                // 已翻译句子：原文在上、译文紧跟其下
+                                ForEach(engine.translationEntries) { entry in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(entry.source)
+                                            .font(.system(size: 17, design: .rounded))
+                                            .foregroundStyle(.secondary)
+                                            .lineSpacing(4)
+                                            .textSelection(.enabled)
+                                        Text(entry.target)
+                                            .font(.system(size: 19, weight: .medium, design: .rounded))
+                                            .foregroundStyle(.primary)
+                                            .lineSpacing(4)
+                                            .textSelection(.enabled)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.vertical, 4)
+                                    .id(entry.id)
+                                }
+                                // 尚未翻译的实时识别文本（正在说的话，翻译完成后转为上面的配对）
+                                if !pendingTail.isEmpty {
+                                    Text(pendingTail)
+                                        .font(.system(size: 19, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                        .lineSpacing(6)
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.vertical, 4)
+                                        .id("tail")
+                                }
+                                if engine.isRecording {
+                                    Text("▍")
+                                        .font(.system(size: 19))
+                                        .foregroundStyle(.tint)
+                                        .id("cursor")
                                 }
                             }
                         }
-                        .padding(16)
                     }
+                    .padding(16)
 
                     // 实时要点（每 10 分钟由 DeepSeek 自动生成，也可点课程栏「生成要点」）
                     if !engine.summaryPoints.isEmpty {
@@ -702,18 +709,23 @@ struct ContentView: View {
                         }
                         .padding(16)
                     }
+
+                    // 滚动锚点：识别文本与译文更新时自动跟随到底部
+                    Color.clear
+                        .frame(height: 0)
+                        .id("bottom")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(theme.isDark ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Color.black.opacity(0.04)))
             .onChange(of: engine.recognizedText) { _, _ in
                 withAnimation {
-                    proxy.scrollTo(engine.isRecording ? "cursor" : "text", anchor: .bottom)
+                    proxy.scrollTo("bottom", anchor: .bottom)
                 }
             }
             .onChange(of: engine.translatedText) { _, _ in
                 withAnimation {
-                    proxy.scrollTo(engine.translatedText.isEmpty ? "text" : "translation", anchor: .bottom)
+                    proxy.scrollTo("bottom", anchor: .bottom)
                 }
             }
         }
@@ -820,10 +832,58 @@ struct ContentView: View {
         }
     }
 
-    /// 最近 1 分钟内产生的翻译记录（界面仅显示这一窗口）。
-    private var recentTranslationEntries: [TranslationEntry] {
-        let cutoff = Date().addingTimeInterval(-SpeechEngine.visibleTranslationWindow)
-        return engine.translationEntries.filter { $0.timestamp >= cutoff }
+    /// 尚未翻译的实时识别文本（已翻译句子以「原文+译文」配对显示在列表中，
+    /// 这里只计算剩余未翻译的尾部，避免与配对列表重复显示）。
+    /// 识别结果可能对已翻译句子做过修正，因此按「单词级容错前缀剥离」处理。
+    private var pendingTail: String {
+        var remaining = engine.recognizedText
+        for entry in engine.translationEntries {
+            remaining = Self.stripTranslatedSource(entry.source, from: remaining)
+        }
+        return remaining.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 把一条已翻译句子的原文从识别文本前缀中剥离。
+    /// 容错规则：逐词匹配，文本侧允许跳过识别修正产生的差异词。
+    private static func stripTranslatedSource(_ source: String, from text: String) -> String {
+        let srcWords = source.split(whereSeparator: { $0.isWhitespace })
+        guard !srcWords.isEmpty else { return text }
+        let textWords = text.split(whereSeparator: { $0.isWhitespace })
+        guard !textWords.isEmpty else { return text }
+
+        var ti = 0
+        var si = 0
+        while si < srcWords.count && ti < textWords.count {
+            if Self.sameWord(srcWords[si], textWords[ti]) {
+                si += 1
+                ti += 1
+            } else {
+                var j = ti + 1
+                var found = false
+                while j < textWords.count {
+                    if Self.sameWord(srcWords[si], textWords[j]) {
+                        ti = j
+                        found = true
+                        break
+                    }
+                    j += 1
+                }
+                if !found { break }
+            }
+        }
+        guard si >= srcWords.count else { return text }
+        guard ti < textWords.count else { return "" }
+        return textWords[ti...].joined(separator: " ")
+    }
+
+    /// 单词级比较：忽略大小写与标点。
+    private static func sameWord(_ a: Substring, _ b: Substring) -> Bool {
+        let clean: (Substring) -> String = { s in
+            s.lowercased().trimmingCharacters(in: .punctuationCharacters)
+        }
+        let ca = clean(a)
+        let cb = clean(b)
+        return !ca.isEmpty && ca == cb
     }
 
     // MARK: - 悬浮字幕窗
@@ -1219,25 +1279,6 @@ private struct FloatingSubtitleView: View {
         )
         .shadow(color: theme.glow, radius: 12, y: 0)
         .frame(width: 360)
-    }
-}
-
-/// 最近 1 分钟翻译记录列表（时间 + 英文原文 + 中文译文）。
-private struct RecentTranslationList: View {
-    let entries: [TranslationEntry]
-
-    var body: some View {
-        if entries.isEmpty {
-            Text("翻译结果将显示在这里（仅保留并显示最近 1 分钟）")
-                .font(.callout)
-                .foregroundStyle(.tertiary)
-        } else {
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(entries) { entry in
-                    TranslationRow(entry: entry, compact: true)
-                }
-            }
-        }
     }
 }
 
